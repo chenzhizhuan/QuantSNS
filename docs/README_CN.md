@@ -46,7 +46,7 @@
 
   <p style="margin-top: 1.45rem; margin-bottom: 10px;">
     <a href="../LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg?style=flat-square&logo=apache" alt="License"></a>
-    <img src="https://img.shields.io/badge/Version-3.0.10-orange?style=flat-square" alt="Version">
+    <img src="https://img.shields.io/github/v/release/brokermr810/QuantDinger?style=flat-square&color=orange&label=Version" alt="Version">
     <img src="https://img.shields.io/badge/Python-3.10%2B%20%7C%20Docker%20镜像%203.12-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python">
     <img src="https://img.shields.io/badge/Docker-Compose%20Ready-2496ED?style=flat-square&logo=docker&logoColor=white" alt="Docker">
     <img src="https://img.shields.io/badge/Frontend-预构建-1f8b4c?style=flat-square" alt="Frontend">
@@ -352,7 +352,7 @@ docker compose pull
 docker compose up -d
 ```
 
-- **`frontend`**：拉取 `ghcr.io/brokermr810/quantdinger-frontend:3.0.10`，无需本地 Vue 目录。
+- **`frontend`**：拉取 `ghcr.io/brokermr810/quantdinger-frontend:latest`，无需本地 Vue 目录。
 - **`backend`**：首次若无本地镜像，会从 `./backend_api_python` 自动构建。
 - 想用本地 Vue 源码做 UI 开发，请将 **QuantDinger-Vue** 克隆到 `./QuantDinger-Vue/`，并在命令中追加 `-f docker-compose.build.yml`（见下文 *从 Vue 源码构建前端*）。
 
@@ -383,7 +383,7 @@ IMAGE_TAG=3.0.10
 # FRONTEND_IMAGE=ghcr.io/<你的fork>/quantdinger-frontend
 ```
 
-Tag 解析优先级：`BACKEND_TAG` / `FRONTEND_TAG` → `IMAGE_TAG` → compose 默认值。无根目录 `.env` 时，`docker-compose.yml` 拉取 `ghcr.io/brokermr810/quantdinger-frontend:3.0.10`（仓库已不再包含 `frontend/dist`）；`docker-compose.ghcr.yml` 默认后端 `3.0.9`、前端 `3.0.10`。
+Tag 解析优先级：`BACKEND_TAG` / `FRONTEND_TAG` → `IMAGE_TAG` → compose 默认值。无根目录 `.env` 时，`docker-compose.yml` 拉取 `ghcr.io/brokermr810/quantdinger-frontend:latest`（仓库已不再包含 `frontend/dist`）；`docker-compose.ghcr.yml` 默认后端 `3.0.9`、前端 `3.0.10`。
 
 #### 备选方案：从 Vue 源码本地构建前端
 

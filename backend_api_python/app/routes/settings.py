@@ -7,6 +7,7 @@ import os
 import re
 import importlib
 from flask import Blueprint, request, jsonify
+from app._version import APP_VERSION
 from app.utils.logger import get_logger
 from app.utils.config_loader import clear_config_cache
 from app.utils.auth import login_required, admin_required
@@ -141,8 +142,8 @@ CONFIG_SCHEMA = {
                 'key': 'BRAND_APP_VERSION',
                 'label': 'App Version',
                 'type': 'text',
-                'default': '3.0.9',
-                'description': 'Version label shown in the sidebar footer ("V3.0.9"). Frontend bundle version stays unchanged.'
+                'default': APP_VERSION,
+                'description': 'Version label shown in the sidebar footer. Leave blank to fall back to the backend build version.'
             },
             {
                 'key': 'BRAND_COPYRIGHT',
@@ -1478,7 +1479,7 @@ def get_public_config():
 # fresh install still ships with sane copy / links instead of blanks.
 _BRAND_DEFAULTS = {
     'app_name': 'QuantDinger',
-    'app_version': '3.0.9',
+    'app_version': APP_VERSION,
     'copyright': '© 2025-2026 QuantDinger. All rights reserved.',
     'contact_email': 'brokermr810@gmail.com',
     'contact_support_url': 'https://t.me/quantdinger',

@@ -46,7 +46,7 @@
 
   <p style="margin-top: 1.45rem; margin-bottom: 10px;">
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg?style=flat-square&logo=apache" alt="License"></a>
-    <img src="https://img.shields.io/badge/Version-3.0.10-orange?style=flat-square" alt="Version">
+    <img src="https://img.shields.io/github/v/release/brokermr810/QuantDinger?style=flat-square&color=orange&label=Version" alt="Version">
     <img src="https://img.shields.io/badge/Python-3.10%2B%20%7C%20Docker%20image%203.12-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python">
     <img src="https://img.shields.io/badge/Docker-Compose%20Ready-2496ED?style=flat-square&logo=docker&logoColor=white" alt="Docker">
     <img src="https://img.shields.io/badge/Frontend-Prebuilt-1f8b4c?style=flat-square" alt="Frontend">
@@ -80,7 +80,7 @@
 
 ## Try in 2 minutes
 
-> **Lightest path: pull images, start the stack — no `npm`, no Vue source folder, and no `docker compose up --build`.** The UI comes from GHCR (`quantdinger-frontend:3.0.10` by default); only the backend is built locally on first boot.
+> **Lightest path: pull images, start the stack — no `npm`, no Vue source folder, and no `docker compose up --build`.** The UI comes from GHCR (`quantdinger-frontend:latest` by default); only the backend is built locally on first boot.
 
 **Prerequisites:** [Docker](https://docs.docker.com/get-docker/) with Compose v2 (Docker Desktop on Windows/macOS). **Git** for the standard path below. **Node.js is not required.**
 
@@ -352,7 +352,7 @@ docker compose pull
 docker compose up -d
 ```
 
-- **`frontend`** — pulls `ghcr.io/brokermr810/quantdinger-frontend:3.0.10` (no local Vue tree required).
+- **`frontend`** — pulls `ghcr.io/brokermr810/quantdinger-frontend:latest` (no local Vue tree required).
 - **`backend`** — built from `./backend_api_python` on first start if no local image exists yet.
 - For UI development from Vue source, clone **QuantDinger-Vue** into `./QuantDinger-Vue/` and add `-f docker-compose.build.yml` to the command (see *Build the frontend from Vue source* below).
 
@@ -384,7 +384,7 @@ IMAGE_TAG=3.0.10
 # FRONTEND_IMAGE=ghcr.io/<your-fork>/quantdinger-frontend
 ```
 
-Tag resolution: `BACKEND_TAG` / `FRONTEND_TAG` → `IMAGE_TAG` → compose defaults. Without a root `.env`, `docker-compose.yml` pulls `ghcr.io/brokermr810/quantdinger-frontend:3.0.10` (bundled `frontend/dist` was removed); `docker-compose.ghcr.yml` defaults to backend `3.0.9` + frontend `3.0.10`.
+Tag resolution: `BACKEND_TAG` / `FRONTEND_TAG` → `IMAGE_TAG` → compose defaults. Without a root `.env`, `docker-compose.yml` pulls `ghcr.io/brokermr810/quantdinger-frontend:latest` (bundled `frontend/dist` was removed); `docker-compose.ghcr.yml` defaults to backend `3.0.9` + frontend `3.0.10`.
 
 #### Alternative: build the frontend from Vue source
 
