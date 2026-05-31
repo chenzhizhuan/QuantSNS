@@ -40,6 +40,7 @@ jobs:
           python -m pip install --upgrade pip
           grep -v "MetaTrader5" requirements.txt > /tmp/requirements_ci.txt
           pip install -r /tmp/requirements_ci.txt
+          pip install pytest
 
       - name: Export OpenAPI spec
         working-directory: ./backend_api_python

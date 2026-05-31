@@ -57,7 +57,7 @@
     <img src="https://img.shields.io/github/stars/brokermr810/QuantDinger?style=flat-square&logo=github" alt="Stars">
     <img src="https://img.shields.io/github/forks/brokermr810/QuantDinger?style=flat-square&logo=github&label=Forks" alt="Forks">
     <img src="https://img.shields.io/badge/dynamic/json?label=Git%20Clones&query=clones_total&url=https://raw.githubusercontent.com/brokermr810/QuantDinger/main/docs/metrics/traffic.json&color=2ea44f&logo=github" alt="Git Clones">
-    <img src="https://hits.seeyoufarm.com/api/count/incr/badge.svg?url=https%3A%2F%2Fgithub.com%2Fbrokermr810%2FQuantDinger&count_bg=%232ea44f&icon=eye.svg&label=Visitors" alt="Visitors">
+    <img src="https://hitscounter.dev/api/hit?url=https%3A%2F%2Fgithub.com%2Fbrokermr810%2FQuantDinger&label=Visitors&icon=github&color=%232ea44f" alt="Visitors">
   </p>
   <p style="margin: 10px 0 12px;">
     <a href="https://aws.amazon.com/marketplace/pp/prodview-naanrb7d2mbc6"><img src="https://img.shields.io/badge/AWS%20Marketplace-AMI%20%7C%20CentOS%209-232F3E?style=flat-square&logo=amazonaws&logoColor=white" alt="QuantDinger on AWS Marketplace (ThinkCloud AMI)"></a>
