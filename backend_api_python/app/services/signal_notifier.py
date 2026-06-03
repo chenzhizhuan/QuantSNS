@@ -28,6 +28,7 @@ import time
 import urllib.parse
 from datetime import datetime, timezone
 from email.message import EmailMessage
+from email.utils import formatdate, make_msgid
 from typing import Any, Dict, List, Optional, Tuple
 
 from zoneinfo import ZoneInfo
@@ -1077,6 +1078,8 @@ class SignalNotifier:
         msg["From"] = self.smtp_from
         msg["To"] = to_email
         msg["Subject"] = str(subject or "Signal")
+        msg["Date"] = formatdate(localtime=True)
+        msg["Message-ID"] = make_msgid()
         msg.set_content(str(body_text or ""))
         if (body_html or "").strip():
             msg.add_alternative(str(body_html or ""), subtype="html")
@@ -1247,5 +1250,4 @@ class SignalNotifier:
             results[c] = {"ok": bool(ok), "error": (err or "")}
 
         return results
-
 

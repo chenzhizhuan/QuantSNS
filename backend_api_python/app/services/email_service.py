@@ -7,6 +7,7 @@ import string
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.utils import formatdate, make_msgid
 from datetime import datetime, timedelta
 from typing import Tuple, Optional
 from app.utils.db import get_db_connection
@@ -236,6 +237,8 @@ class EmailService:
             msg['Subject'] = subject
             msg['From'] = self.smtp_from
             msg['To'] = to_email
+            msg['Date'] = formatdate(localtime=True)
+            msg['Message-ID'] = make_msgid()
             
             # Plain text version (fallback)
             text_body = html_body.replace('<br>', '\n').replace('<br/>', '\n')
