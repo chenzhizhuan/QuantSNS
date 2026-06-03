@@ -302,3 +302,13 @@ DO UPDATE SET name = EXCLUDED.name, updated_at = now();
 
 COMMIT;
 
+BEGIN;
+
+INSERT INTO public.qd_watchlist (user_id, market, symbol, name)
+VALUES
+(1, 'CNStock', '002428', '云南锗业')
+ON CONFLICT (user_id, market, symbol)
+DO UPDATE SET name = EXCLUDED.name, updated_at = now();
+
+COMMIT;
+
