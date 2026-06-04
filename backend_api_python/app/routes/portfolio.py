@@ -550,74 +550,6 @@ def get_monitors():
                 (user_id,)
             )
             rows = cur.fetchall() or []
-
-            all_position_ids = set()
-            parsed_position_ids = {}
-            for row in rows:
-                ids = _safe_json_loads(row.get('position_ids'), [])
-                if not isinstance(ids, list):
-                    ids = []
-                norm_ids = []
-                for pid in ids:
-                    try:
-                        norm_ids.append(int(pid))
-                    except Exception:
-                        continue
-                parsed_position_ids[row.get('id')] = norm_ids
-                for pid in norm_ids:
-                    all_position_ids.add(pid)
-
-            positions_by_id = {}
-            if all_position_ids:
-                placeholders = ','.join(['?' for _ in all_position_ids])
-                cur.execute(
-                    f"""
-                    SELECT id, market, symbol, name
-                    FROM qd_manual_positions
-                    WHERE user_id = ? AND id IN ({placeholders})
-                    """,
-                    [user_id] + list(all_position_ids),
-                )
-                pos_rows = cur.fetchall() or []
-                for prow in pos_rows:
-                    positions_by_id[prow.get('id')] = prow
-
-            for row in rows:
-                try:
-                    current_name = (row.get('name') or '').strip()
-                    if current_name:
-                        continue
-
-                    monitor_id = row.get('id')
-                    ids = parsed_position_ids.get(monitor_id) or []
-                    resolved_name = ''
-
-                    for pid in ids:
-                        pos = positions_by_id.get(pid)
-                        if not pos:
-                            continue
-                        market = (pos.get('market') or '').strip()
-                        symbol = (pos.get('symbol') or '').strip()
-                        if not market or not symbol:
-                            continue
-                        pos_name = (pos.get('name') or '').strip()
-                        if pos_name and pos_name != symbol:
-                            resolved_name = pos_name
-                        else:
-                            resolved_name = resolve_symbol_name(market, symbol) or seed_get_symbol_name(market, symbol) or symbol
-                        if resolved_name:
-                            break
-
-                    if resolved_name:
-                        row['name'] = resolved_name
-                        cur.execute(
-                            "UPDATE qd_position_monitors SET name = ?, updated_at = NOW() WHERE id = ? AND user_id = ?",
-                            (resolved_name, monitor_id, user_id),
-                        )
-                except Exception:
-                    continue
-
-            db.commit()
             cur.close()
 
         monitors = []
@@ -625,7 +557,7 @@ def get_monitors():
             monitors.append({
                 'id': row.get('id'),
                 'name': row.get('name') or '',
-                'position_ids': parsed_position_ids.get(row.get('id')) or _safe_json_loads(row.get('position_ids'), []),
+                'position_ids': _safe_json_loads(row.get('position_ids'), []),
                 'monitor_type': row.get('monitor_type') or 'ai',
                 'config': _safe_json_loads(row.get('config'), {}),
                 'notification_config': _safe_json_loads(row.get('notification_config'), {}),
