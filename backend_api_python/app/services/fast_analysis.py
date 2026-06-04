@@ -1470,16 +1470,20 @@ IMPORTANT:
                         return up == str(normalize_hk_code(symbol) or "").strip().upper()
                     return False
 
+                explicit_name = (result.get("name") or "").strip()
+                if _is_placeholder_name(explicit_name):
+                    explicit_name = ""
+
                 if _is_placeholder_name(company_name):
                     company_name = ""
 
                 resolved_name = ""
-                if not company_name and market in ("CNStock", "HKStock", "USStock"):
+                if not explicit_name and not company_name and market in ("CNStock", "HKStock", "USStock"):
                     resolved_name = (resolve_symbol_name(market, symbol) or "").strip()
                     if _is_placeholder_name(resolved_name):
                         resolved_name = ""
 
-                final_name = company_name or resolved_name
+                final_name = explicit_name or company_name or resolved_name
                 if not final_name:
                     final_name = str(symbol or "").strip().upper()
                 if final_name:

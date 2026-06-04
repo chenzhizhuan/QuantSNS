@@ -203,7 +203,6 @@ class AnalysisMemory:
                 symbol = analysis_result.get("symbol")
                 
                 name = (analysis_result.get("name") or "").strip()
-                # 如果 name 为空，或者 name 等于 symbol（说明 fast_analysis 没有解析到真实名称而使用了 fallback）
                 if (not name or name.upper() == str(symbol or "").strip().upper()) and market and symbol:
                     resolved = resolve_symbol_name(market, symbol)
                     if resolved and resolved.upper() != str(symbol).strip().upper():
