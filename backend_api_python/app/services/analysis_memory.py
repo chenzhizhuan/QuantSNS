@@ -17,6 +17,7 @@ from app.utils.logger import get_logger
 from app.utils.db import get_db_connection
 from app.services.symbol_name import resolve_symbol_name, seed_get_symbol_name
 from app.data_sources.factory import DataSourceFactory
+from app.data_sources.tencent import normalize_cn_code, normalize_hk_code
 
 logger = get_logger(__name__)
 
@@ -338,8 +339,46 @@ class AnalysisMemory:
                 """, params)
                 
                 rows = cur.fetchall() or []
+
+                symbol_seed: Dict[tuple, str] = {}
+                seed_conds = []
+                seed_params = []
+                for row in rows:
+                    market = DataSourceFactory.normalize_market(row.get('market') or '')
+                    symbol = (row.get('symbol') or '').strip().upper()
+                    if not market or not symbol:
+                        continue
+                    candidates = [symbol]
+                    if market == 'CNStock':
+                        candidates.append(normalize_cn_code(symbol))
+                    elif market == 'HKStock':
+                        candidates.append(normalize_hk_code(symbol))
+                    for cand in candidates:
+                        cand = (cand or '').strip().upper()
+                        if not cand:
+                            continue
+                        key = (market, cand)
+                        if key in symbol_seed:
+                            continue
+                        symbol_seed[key] = ''
+                        seed_conds.append("(market = %s AND symbol = %s)")
+                        seed_params.extend([market, cand])
+                if seed_conds:
+                    try:
+                        cur.execute(
+                            f"SELECT market, symbol, name FROM qd_market_symbols WHERE {' OR '.join(seed_conds)}",
+                            tuple(seed_params),
+                        )
+                        for r in cur.fetchall() or []:
+                            mk = (r.get('market') or '').strip()
+                            sy = (r.get('symbol') or '').strip().upper()
+                            nm = (r.get('name') or '').strip()
+                            if mk and sy and nm:
+                                symbol_seed[(mk, sy)] = nm
+                    except Exception:
+                        pass
                 cur.close()
-                
+
                 items = []
                 name_cache: Dict[tuple, str] = {}
                 for row in rows:
@@ -347,6 +386,17 @@ class AnalysisMemory:
                     symbol = row['symbol']
                     display_name = (row.get('name') or row.get('watchlist_name') or '').strip()
                     canonical_market = DataSourceFactory.normalize_market(market or "")
+                    if canonical_market and symbol and not display_name:
+                        candidates = [str(symbol).strip().upper()]
+                        if canonical_market == 'CNStock':
+                            candidates.append(normalize_cn_code(symbol))
+                        elif canonical_market == 'HKStock':
+                            candidates.append(normalize_hk_code(symbol))
+                        for cand in candidates:
+                            nm = symbol_seed.get((canonical_market, str(cand or '').strip().upper())) or ''
+                            if nm:
+                                display_name = nm
+                                break
                     if canonical_market and symbol and (not display_name or display_name == symbol):
                         key = (canonical_market, symbol)
                         resolved = name_cache.get(key)
