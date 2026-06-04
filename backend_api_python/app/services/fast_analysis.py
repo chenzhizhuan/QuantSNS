@@ -18,7 +18,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from app.utils.logger import get_logger
 from app.services.llm import LLMService
 from app.services.market_data_collector import get_market_data_collector
-from app.services.symbol_name import persist_seed_name
+from app.services.symbol_name import persist_seed_name, resolve_symbol_name
 from app.data_sources.tencent import normalize_cn_code, normalize_hk_code
 
 logger = get_logger(__name__)
@@ -1455,22 +1455,36 @@ IMPORTANT:
             try:
                 company = data.get("company") or {}
                 company_name = (company.get("name") or "").strip()
-                if company_name:
+                def _is_placeholder_name(nm: str) -> bool:
+                    if not nm:
+                        return True
+                    up = nm.strip().upper()
+                    sym_up = str(symbol or "").strip().upper()
+                    if up == sym_up:
+                        return True
                     if market == "CNStock":
-                        norm = normalize_cn_code(symbol)
-                        if company_name.upper() in {str(symbol or "").strip().upper(), str(norm or "").strip().upper()}:
-                            company_name = ""
-                    elif market == "HKStock":
-                        norm = normalize_hk_code(symbol)
-                        if company_name.upper() in {str(symbol or "").strip().upper(), str(norm or "").strip().upper()}:
-                            company_name = ""
-                if company_name:
-                    result["name"] = company_name
-                    persist_seed_name(market, symbol, company_name)
+                        return up == str(normalize_cn_code(symbol) or "").strip().upper()
+                    if market == "HKStock":
+                        return up == str(normalize_hk_code(symbol) or "").strip().upper()
+                    return False
+
+                if _is_placeholder_name(company_name):
+                    company_name = ""
+
+                resolved_name = ""
+                if not company_name and market in ("CNStock", "HKStock", "USStock"):
+                    resolved_name = (resolve_symbol_name(market, symbol) or "").strip()
+                    if _is_placeholder_name(resolved_name):
+                        resolved_name = ""
+
+                final_name = company_name or resolved_name
+                if final_name:
+                    result["name"] = final_name
+                    persist_seed_name(market, symbol, final_name)
                     if market == "CNStock":
-                        persist_seed_name(market, normalize_cn_code(symbol), company_name)
+                        persist_seed_name(market, normalize_cn_code(symbol), final_name)
                     elif market == "HKStock":
-                        persist_seed_name(market, normalize_hk_code(symbol), company_name)
+                        persist_seed_name(market, normalize_hk_code(symbol), final_name)
             except Exception:
                 pass
             
