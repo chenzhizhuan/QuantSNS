@@ -59,8 +59,20 @@ class AnalysisMemory:
             if not market or not symbol:
                 continue
             sym_u = symbol.upper()
+            if ':' in sym_u:
+                sym_u = sym_u.split(':', 1)[0].strip()
+            if not sym_u:
+                continue
             market_to_symbols.setdefault(market, set()).add(sym_u)
             if market == 'Crypto' and '/' not in sym_u:
+                common_quotes = (
+                    'USDT', 'USDC', 'BUSD', 'USD', 'EUR', 'GBP', 'BTC', 'ETH', 'BNB',
+                )
+                for quote in common_quotes:
+                    if sym_u.endswith(quote) and len(sym_u) > len(quote):
+                        base = sym_u[:-len(quote)].strip()
+                        if base:
+                            market_to_symbols[market].add(f"{base}/{quote}")
                 market_to_symbols[market].add(f"{sym_u}/USDT")
 
         name_map: Dict[tuple, str] = {}
@@ -89,7 +101,7 @@ class AnalysisMemory:
                 finally:
                     cur.close()
         except Exception as e:
-            logger.debug(f"Attach symbol names failed: {e}")
+            logger.warning(f"Attach symbol names failed: {e}")
 
         for item in items:
             market = (item.get('market') or '').strip()
@@ -98,9 +110,22 @@ class AnalysisMemory:
                 item['name'] = ''
                 continue
             sym_u = symbol.upper()
+            if ':' in sym_u:
+                sym_u = sym_u.split(':', 1)[0].strip()
             name = name_map.get((market, sym_u))
             if not name and market == 'Crypto' and '/' not in sym_u:
                 name = name_map.get((market, f"{sym_u}/USDT"))
+                if not name:
+                    common_quotes = (
+                        'USDT', 'USDC', 'BUSD', 'USD', 'EUR', 'GBP', 'BTC', 'ETH', 'BNB',
+                    )
+                    for quote in common_quotes:
+                        if sym_u.endswith(quote) and len(sym_u) > len(quote):
+                            base = sym_u[:-len(quote)].strip()
+                            if base:
+                                name = name_map.get((market, f"{base}/{quote}"))
+                                if name:
+                                    break
             item['name'] = name or ''
     
     def _ensure_table(self):
