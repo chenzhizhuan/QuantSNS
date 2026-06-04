@@ -43,7 +43,7 @@ def _try_refund_credits(user_id: int, amount: int, remark: str):
 
 def _run_async_analysis_task(task_memory_id: int, market: str, symbol: str, language: str,
                              model: str, timeframe: str, user_id: int, inflight_key: str,
-                             credits_charged: int = 0):
+                             credits_charged: int = 0, name: str = ""):
     """
     Background worker: execute analysis and update pending history record.
     """
@@ -51,12 +51,13 @@ def _run_async_analysis_task(task_memory_id: int, market: str, symbol: str, lang
         service = get_fast_analysis_service()
         memory = get_analysis_memory()
         result = service.analyze(
-            market=market,
-            symbol=symbol,
-            language=language,
+            market=market, 
+            symbol=symbol, 
+            language=language, 
             model=model,
             timeframe=timeframe,
-            user_id=user_id
+            user_id=user_id,
+            name=name
         )
         memory.finalize_pending_task(task_memory_id, result)
         if result.get("error"):
@@ -132,6 +133,7 @@ def analyze():
         
         market = DataSourceFactory.normalize_market((data.get('market') or '').strip())
         symbol = (data.get('symbol') or '').strip().upper()
+        name = (data.get('name') or '').strip()
         language = data.get('language', 'en-US')
         model = data.get('model')
         timeframe = data.get('timeframe', '1D')
@@ -220,7 +222,7 @@ def analyze():
 
             t = threading.Thread(
                 target=_run_async_analysis_task,
-                args=(int(pending_id), market, symbol, language, model, timeframe, int(user_id), inflight_key, int(credits_charged or 0)),
+                args=(int(pending_id), market, symbol, language, model, timeframe, int(user_id), inflight_key, int(credits_charged or 0), name),
                 daemon=True
             )
             t.start()
@@ -243,12 +245,13 @@ def analyze():
             })
 
         result = service.analyze(
-            market=market,
-            symbol=symbol,
-            language=language,
+            market=market, 
+            symbol=symbol, 
+            language=language, 
             model=model,
             timeframe=timeframe,
-            user_id=user_id
+            user_id=user_id,
+            name=name
         )
         
         if result.get('error'):

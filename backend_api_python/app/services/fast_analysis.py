@@ -904,7 +904,7 @@ IMPORTANT:
     # ==================== Main Analysis ====================
     
     def analyze(self, market: str, symbol: str, language: str = 'en-US', 
-                model: str = None, timeframe: str = "1D", user_id: int = None) -> Dict[str, Any]:
+                model: str = None, timeframe: str = "1D", user_id: int = None, name: str = None) -> Dict[str, Any]:
         """
         Run fast single-call analysis.
         
@@ -915,6 +915,7 @@ IMPORTANT:
             model: LLM model to use
             timeframe: Analysis timeframe (1D, 4H, etc.)
             user_id: User ID for storing analysis history
+            name: Explicit name of the symbol if available
         
         Returns:
             Complete analysis result with actionable recommendations.
@@ -929,6 +930,7 @@ IMPORTANT:
         result = {
             "market": market,
             "symbol": symbol,
+            "name": name,
             "language": language,
             "model": model,  # Include model in result from the start
             "timeframe": timeframe,
