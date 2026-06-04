@@ -632,12 +632,44 @@ def get_watchlist_prices():
                 legacy_count, user_id,
             )
 
+        all_param = (request.args.get("all") or "").strip().lower()
+        fetch_all = all_param in ("1", "true", "yes", "y")
+
+        def _parse_paging_int(raw: str, default: int) -> int:
+            try:
+                return int(raw)
+            except Exception:
+                return default
+
+        limit = None if fetch_all else _parse_paging_int(request.args.get("limit") or "", 50)
+        offset = 0 if fetch_all else _parse_paging_int(request.args.get("offset") or "", 0)
+
+        if limit is not None:
+            if limit <= 0:
+                limit = 50
+            limit = min(limit, 200)
+        if offset < 0:
+            offset = 0
+
         with get_db_connection() as db:
             cur = db.cursor()
             cur.execute(
-                "SELECT market, symbol FROM qd_watchlist WHERE user_id = ?",
+                "SELECT COUNT(1) AS cnt FROM qd_watchlist WHERE user_id = ?",
                 (user_id,),
             )
+            total_row = cur.fetchone() or {}
+            total = int(total_row.get("cnt") or 0)
+
+            if fetch_all:
+                cur.execute(
+                    "SELECT market, symbol FROM qd_watchlist WHERE user_id = ? ORDER BY id DESC",
+                    (user_id,),
+                )
+            else:
+                cur.execute(
+                    "SELECT market, symbol FROM qd_watchlist WHERE user_id = ? ORDER BY id DESC LIMIT ? OFFSET ?",
+                    (user_id, limit, offset),
+                )
             rows = cur.fetchall() or []
             cur.close()
 
@@ -647,7 +679,12 @@ def get_watchlist_prices():
         ]
 
         if not watchlist:
-            return jsonify({'code': 1, 'msg': 'success', 'data': []})
+            return jsonify({
+                'code': 1,
+                'msg': 'success',
+                'data': [],
+                'meta': {'total': total, 'limit': limit, 'offset': offset, 'all': fetch_all},
+            })
 
         results = []
         futures = {}
@@ -677,7 +714,7 @@ def get_watchlist_prices():
                         'change': 0,
                         'changePercent': 0
                     })
-        except TimeoutError:
+        except FuturesTimeoutError:
             # 超时时，为未完成的任务添加默认结果
             for future, (market, symbol) in futures.items():
                 if future not in completed_futures:
@@ -692,12 +729,16 @@ def get_watchlist_prices():
                     })
         
         success_count = sum(1 for r in results if r.get('price', 0) > 0)
-        logger.info(f"Watchlist prices: {success_count}/{len(results)} successful")
+        logger.info(
+            "Watchlist prices: %s/%s successful (user=%s, total=%s, limit=%s, offset=%s, all=%s)",
+            success_count, len(results), user_id, total, limit, offset, fetch_all,
+        )
         
         return jsonify({
             'code': 1,
             'msg': 'success',
-            'data': results
+            'data': results,
+            'meta': {'total': total, 'limit': limit, 'offset': offset, 'all': fetch_all},
         })
         
     except Exception as e:
