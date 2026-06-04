@@ -491,9 +491,11 @@ class AnalysisMemory:
                 reasons = json.dumps([])
                 scores = json.dumps({})
                 indicators = json.dumps({})
+                default_name = (symbol or '').strip().upper()
                 raw = json.dumps({
                     "market": market,
                     "symbol": symbol,
+                    "name": default_name,
                     "language": language,
                     "model": model,
                     "timeframe": timeframe,
@@ -509,7 +511,7 @@ class AnalysisMemory:
                               %s, %s, NOW(), NOW())
                     RETURNING id
                 """, (
-                    user_id, market, symbol, None, "HOLD", 0,
+                    user_id, market, symbol, default_name, "HOLD", 0,
                     summary, reasons, scores, indicators, raw,
                     "processing", "",
                 ))

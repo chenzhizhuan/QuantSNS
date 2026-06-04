@@ -1490,6 +1490,9 @@ IMPORTANT:
                             persist_seed_name(market, normalize_hk_code(symbol), final_name)
             except Exception:
                 pass
+
+            if not result.get("name"):
+                result["name"] = str(symbol or "").strip().upper()
             
             # Store in memory for future retrieval and get memory_id for feedback
             memory_id = self._store_analysis_memory(result, user_id=user_id)
