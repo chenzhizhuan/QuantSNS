@@ -18,6 +18,8 @@ from decimal import Decimal, ROUND_HALF_UP
 from app.utils.logger import get_logger
 from app.services.llm import LLMService
 from app.services.market_data_collector import get_market_data_collector
+from app.services.symbol_name import persist_seed_name
+from app.data_sources.tencent import normalize_cn_code, normalize_hk_code
 
 logger = get_logger(__name__)
 
@@ -1449,6 +1451,28 @@ IMPORTANT:
                 "llm_time_ms": llm_time,
                 "data_collection_time_ms": data.get("collection_time_ms", 0),
             })
+
+            try:
+                company = data.get("company") or {}
+                company_name = (company.get("name") or "").strip()
+                if company_name:
+                    if market == "CNStock":
+                        norm = normalize_cn_code(symbol)
+                        if company_name.upper() in {str(symbol or "").strip().upper(), str(norm or "").strip().upper()}:
+                            company_name = ""
+                    elif market == "HKStock":
+                        norm = normalize_hk_code(symbol)
+                        if company_name.upper() in {str(symbol or "").strip().upper(), str(norm or "").strip().upper()}:
+                            company_name = ""
+                if company_name:
+                    result["name"] = company_name
+                    persist_seed_name(market, symbol, company_name)
+                    if market == "CNStock":
+                        persist_seed_name(market, normalize_cn_code(symbol), company_name)
+                    elif market == "HKStock":
+                        persist_seed_name(market, normalize_hk_code(symbol), company_name)
+            except Exception:
+                pass
             
             # Store in memory for future retrieval and get memory_id for feedback
             memory_id = self._store_analysis_memory(result, user_id=user_id)

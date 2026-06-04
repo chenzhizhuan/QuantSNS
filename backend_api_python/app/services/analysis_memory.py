@@ -387,6 +387,11 @@ class AnalysisMemory:
                     display_name = (row.get('name') or row.get('watchlist_name') or '').strip()
                     canonical_market = DataSourceFactory.normalize_market(market or "")
                     if canonical_market and symbol and not display_name:
+                        raw = _safe_json_parse(row.get('raw_result'), {}) or {}
+                        raw_name = (raw.get('name') or '').strip() if isinstance(raw, dict) else ''
+                        if raw_name:
+                            display_name = raw_name
+                    if canonical_market and symbol and not display_name:
                         candidates = [str(symbol).strip().upper()]
                         if canonical_market == 'CNStock':
                             candidates.append(normalize_cn_code(symbol))
