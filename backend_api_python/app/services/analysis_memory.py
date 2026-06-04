@@ -41,6 +41,67 @@ class AnalysisMemory:
     
     def __init__(self):
         self._ensure_table()
+
+    def _attach_symbol_names(self, items: List[Dict[str, Any]]) -> None:
+        """
+        Attach `qd_market_symbols.name` into each history item as `name`.
+
+        Args:
+            items: List of history item dicts. Each item should include `market` and `symbol`.
+        """
+        if not items:
+            return
+
+        market_to_symbols: Dict[str, set] = {}
+        for item in items:
+            market = (item.get('market') or '').strip()
+            symbol = (item.get('symbol') or '').strip()
+            if not market or not symbol:
+                continue
+            sym_u = symbol.upper()
+            market_to_symbols.setdefault(market, set()).add(sym_u)
+            if market == 'Crypto' and '/' not in sym_u:
+                market_to_symbols[market].add(f"{sym_u}/USDT")
+
+        name_map: Dict[tuple, str] = {}
+        try:
+            with get_db_connection() as db:
+                cur = db.cursor()
+                try:
+                    for market, symbols in market_to_symbols.items():
+                        sym_list = sorted(symbols)
+                        if not sym_list:
+                            continue
+                        placeholders = ','.join(['%s'] * len(sym_list))
+                        cur.execute(
+                            f"""
+                            SELECT market, UPPER(symbol) AS symbol_u, name
+                            FROM qd_market_symbols
+                            WHERE market = %s AND UPPER(symbol) IN ({placeholders})
+                            """,
+                            (market, *sym_list),
+                        )
+                        rows = cur.fetchall() or []
+                        for row in rows:
+                            nm = (row.get('name') or '').strip()
+                            if nm:
+                                name_map[(row.get('market'), (row.get('symbol_u') or '').upper())] = nm
+                finally:
+                    cur.close()
+        except Exception as e:
+            logger.debug(f"Attach symbol names failed: {e}")
+
+        for item in items:
+            market = (item.get('market') or '').strip()
+            symbol = (item.get('symbol') or '').strip()
+            if not market or not symbol:
+                item['name'] = ''
+                continue
+            sym_u = symbol.upper()
+            name = name_map.get((market, sym_u))
+            if not name and market == 'Crypto' and '/' not in sym_u:
+                name = name_map.get((market, f"{sym_u}/USDT"))
+            item['name'] = name or ''
     
     def _ensure_table(self):
         """Create memory table if not exists, and add missing columns if needed."""
@@ -340,6 +401,7 @@ class AnalysisMemory:
                         "id": row['id'],
                         "market": row['market'],
                         "symbol": row['symbol'],
+                        "name": "",
                         "decision": row['decision'],
                         "confidence": row['confidence'],
                         "price": float(row['price_at_analysis']) if row['price_at_analysis'] else None,
@@ -355,6 +417,8 @@ class AnalysisMemory:
                         "was_correct": row['was_correct'],
                         "actual_return_pct": float(row['actual_return_pct']) if row['actual_return_pct'] else None,
                     })
+
+                self._attach_symbol_names(items)
                 
                 return {
                     "items": items,
