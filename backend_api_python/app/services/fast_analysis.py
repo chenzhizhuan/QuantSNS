@@ -1478,13 +1478,16 @@ IMPORTANT:
                         resolved_name = ""
 
                 final_name = company_name or resolved_name
+                if not final_name:
+                    final_name = str(symbol or "").strip().upper()
                 if final_name:
                     result["name"] = final_name
-                    persist_seed_name(market, symbol, final_name)
-                    if market == "CNStock":
-                        persist_seed_name(market, normalize_cn_code(symbol), final_name)
-                    elif market == "HKStock":
-                        persist_seed_name(market, normalize_hk_code(symbol), final_name)
+                    if not _is_placeholder_name(final_name):
+                        persist_seed_name(market, symbol, final_name)
+                        if market == "CNStock":
+                            persist_seed_name(market, normalize_cn_code(symbol), final_name)
+                        elif market == "HKStock":
+                            persist_seed_name(market, normalize_hk_code(symbol), final_name)
             except Exception:
                 pass
             
