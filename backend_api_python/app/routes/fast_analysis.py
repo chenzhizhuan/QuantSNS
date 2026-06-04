@@ -13,6 +13,8 @@ from app.utils.logger import get_logger
 from app.services.fast_analysis import get_fast_analysis_service
 from app.services.analysis_memory import get_analysis_memory
 from app.services.billing_service import get_billing_service
+from app.data_sources.factory import DataSourceFactory
+from app.services.symbol_name import normalize_crypto_symbol
 
 logger = get_logger(__name__)
 
@@ -128,12 +130,15 @@ def analyze():
     try:
         data = request.get_json() or {}
         
-        market = (data.get('market') or '').strip()
-        symbol = (data.get('symbol') or '').strip()
+        market = DataSourceFactory.normalize_market((data.get('market') or '').strip())
+        symbol = (data.get('symbol') or '').strip().upper()
         language = data.get('language', 'en-US')
         model = data.get('model')
         timeframe = data.get('timeframe', '1D')
         async_submit = bool(data.get('async_submit', False))
+
+        if market == 'Crypto':
+            symbol = normalize_crypto_symbol(symbol)
         
         if not market or not symbol:
             return jsonify({

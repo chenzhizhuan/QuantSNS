@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 from app.utils.logger import get_logger
 from app.utils.db import get_db_connection
 from app.services.symbol_name import resolve_symbol_name, seed_get_symbol_name
+from app.data_sources.factory import DataSourceFactory
 
 logger = get_logger(__name__)
 
@@ -343,12 +344,13 @@ class AnalysisMemory:
                     market = row['market']
                     symbol = row['symbol']
                     display_name = (row.get('name') or '').strip()
-                    if market and symbol and (not display_name or display_name == symbol):
-                        key = (market, symbol)
+                    canonical_market = DataSourceFactory.normalize_market(market or "")
+                    if canonical_market and symbol and (not display_name or display_name == symbol):
+                        key = (canonical_market, symbol)
                         resolved = name_cache.get(key)
                         if resolved is None:
                             try:
-                                resolved = resolve_symbol_name(market, symbol) or seed_get_symbol_name(market, symbol) or ''
+                                resolved = resolve_symbol_name(canonical_market, symbol) or ''
                             except Exception:
                                 resolved = ''
                             name_cache[key] = resolved
