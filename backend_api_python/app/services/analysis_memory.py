@@ -15,9 +15,6 @@ from datetime import datetime, timedelta
 
 from app.utils.logger import get_logger
 from app.utils.db import get_db_connection
-from app.services.symbol_name import resolve_symbol_name, seed_get_symbol_name
-from app.data_sources.factory import DataSourceFactory
-from app.data_sources.tencent import normalize_cn_code, normalize_hk_code
 
 logger = get_logger(__name__)
 
@@ -58,7 +55,6 @@ class AnalysisMemory:
                         user_id INT,
                         market VARCHAR(50) NOT NULL,
                         symbol VARCHAR(50) NOT NULL,
-                        name VARCHAR(255),
                         decision VARCHAR(10) NOT NULL,
                         confidence INT DEFAULT 50,
                         price_at_analysis DECIMAL(24, 8),
@@ -94,13 +90,6 @@ class AnalysisMemory:
                             WHERE table_name = 'qd_analysis_memory' AND column_name = 'user_id'
                         ) THEN
                             ALTER TABLE qd_analysis_memory ADD COLUMN user_id INT;
-                        END IF;
-
-                        IF NOT EXISTS (
-                            SELECT 1 FROM information_schema.columns
-                            WHERE table_name = 'qd_analysis_memory' AND column_name = 'name'
-                        ) THEN
-                            ALTER TABLE qd_analysis_memory ADD COLUMN name VARCHAR(255);
                         END IF;
                         
                         -- 添加 raw_result 列（如果不存在）
@@ -201,14 +190,6 @@ class AnalysisMemory:
                 # 准备数据
                 market = analysis_result.get("market")
                 symbol = analysis_result.get("symbol")
-                
-                name = (analysis_result.get("name") or "").strip()
-                if (not name or name.upper() == str(symbol or "").strip().upper()) and market and symbol:
-                    resolved = resolve_symbol_name(market, symbol)
-                    if resolved and resolved.upper() != str(symbol).strip().upper():
-                        name = resolved
-                name = name.strip() or None
-                
                 decision = analysis_result.get("decision")
                 confidence = analysis_result.get("confidence")
                 price = analysis_result.get("market_data", {}).get("current_price")
@@ -226,15 +207,15 @@ class AnalysisMemory:
                 
                 cur.execute("""
                     INSERT INTO qd_analysis_memory (
-                        user_id, market, symbol, name, decision, confidence,
+                        user_id, market, symbol, decision, confidence,
                         price_at_analysis, summary, reasons, scores, indicators_snapshot, raw_result,
                         consensus_score, consensus_abs, agreement_ratio, quality_multiplier,
                         task_status, task_error, updated_at
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                              %s, %s, %s, %s, %s, %s, %s, NOW())
+                              %s, %s, %s, %s, %s, %s, NOW())
                     RETURNING id
                 """, (
-                    user_id, market, symbol, name, decision, confidence,
+                    user_id, market, symbol, decision, confidence,
                     price, summary, reasons, scores, indicators, raw,
                     consensus_score, consensus_abs, agreement_ratio, quality_multiplier,
                     "completed", "",
@@ -271,8 +252,8 @@ class AnalysisMemory:
                 days_int = int(days)
                 cur.execute("""
                     SELECT 
-                        id, market, symbol, name, decision, confidence, price_at_analysis,
-                        summary, reasons, scores, raw_result,
+                        id, decision, confidence, price_at_analysis,
+                        summary, reasons, scores,
                         created_at, validated_at, was_correct, actual_return_pct,
                         task_status, task_error, updated_at
                     FROM qd_analysis_memory
@@ -287,18 +268,8 @@ class AnalysisMemory:
                 
                 results = []
                 for row in rows:
-                    display_name = (row.get('name') or '').strip()
-                    if not display_name:
-                        raw = _safe_json_parse(row.get('raw_result'), {}) or {}
-                        raw_name = (raw.get('name') or '').strip() if isinstance(raw, dict) else ''
-                        if raw_name:
-                            display_name = raw_name
-                    if not display_name:
-                        display_name = resolve_symbol_name(market, symbol) or ""
-
                     results.append({
                         "id": row['id'],
-                        "name": display_name,
                         "decision": row['decision'],
                         "confidence": row['confidence'],
                         "price": float(row['price_at_analysis']) if row['price_at_analysis'] else None,
@@ -338,11 +309,11 @@ class AnalysisMemory:
                 cur = db.cursor()
                 
                 # Build WHERE clause based on user_id
-                where_clause = "WHERE m.user_id = %s" if user_id else ""
+                where_clause = "WHERE user_id = %s" if user_id else ""
                 params_count = (user_id,) if user_id else ()
                 
                 # Get total count
-                cur.execute(f"SELECT COUNT(*) as cnt FROM qd_analysis_memory m {where_clause}", params_count)
+                cur.execute(f"SELECT COUNT(*) as cnt FROM qd_analysis_memory {where_clause}", params_count)
                 total_row = cur.fetchone()
                 total = total_row['cnt'] if total_row else 0
                 
@@ -350,101 +321,25 @@ class AnalysisMemory:
                 params = (user_id, page_size, offset) if user_id else (page_size, offset)
                 cur.execute(f"""
                     SELECT 
-                        m.id, m.market, m.symbol, m.name AS memory_name, ms.name, wl.name AS watchlist_name, m.decision, m.confidence, m.price_at_analysis,
-                        m.summary, m.reasons, m.scores, m.indicators_snapshot, m.raw_result,
-                        m.created_at, m.validated_at, m.was_correct, m.actual_return_pct,
-                        m.task_status, m.task_error, m.updated_at
-                    FROM qd_analysis_memory m
-                    LEFT JOIN qd_market_symbols ms
-                      ON ms.market = m.market AND ms.symbol = m.symbol
-                    LEFT JOIN qd_watchlist wl
-                      ON wl.user_id = m.user_id AND wl.market = m.market AND wl.symbol = m.symbol
+                        id, market, symbol, decision, confidence, price_at_analysis,
+                        summary, reasons, scores, indicators_snapshot, raw_result,
+                        created_at, validated_at, was_correct, actual_return_pct,
+                        task_status, task_error, updated_at
+                    FROM qd_analysis_memory
                     {where_clause}
-                    ORDER BY m.created_at DESC
+                    ORDER BY created_at DESC
                     LIMIT %s OFFSET %s
                 """, params)
                 
                 rows = cur.fetchall() or []
-
-                symbol_seed: Dict[tuple, str] = {}
-                seed_conds = []
-                seed_params = []
-                for row in rows:
-                    market = DataSourceFactory.normalize_market(row.get('market') or '')
-                    symbol = (row.get('symbol') or '').strip().upper()
-                    if not market or not symbol:
-                        continue
-                    candidates = [symbol]
-                    if market == 'CNStock':
-                        candidates.append(normalize_cn_code(symbol))
-                    elif market == 'HKStock':
-                        candidates.append(normalize_hk_code(symbol))
-                    for cand in candidates:
-                        cand = (cand or '').strip().upper()
-                        if not cand:
-                            continue
-                        key = (market, cand)
-                        if key in symbol_seed:
-                            continue
-                        symbol_seed[key] = ''
-                        seed_conds.append("(market = %s AND symbol = %s)")
-                        seed_params.extend([market, cand])
-                if seed_conds:
-                    try:
-                        cur.execute(
-                            f"SELECT market, symbol, name FROM qd_market_symbols WHERE {' OR '.join(seed_conds)}",
-                            tuple(seed_params),
-                        )
-                        for r in cur.fetchall() or []:
-                            mk = (r.get('market') or '').strip()
-                            sy = (r.get('symbol') or '').strip().upper()
-                            nm = (r.get('name') or '').strip()
-                            if mk and sy and nm:
-                                symbol_seed[(mk, sy)] = nm
-                    except Exception:
-                        pass
                 cur.close()
-
+                
                 items = []
-                name_cache: Dict[tuple, str] = {}
                 for row in rows:
-                    market = row['market']
-                    symbol = row['symbol']
-                    display_name = (row.get('memory_name') or row.get('name') or row.get('watchlist_name') or '').strip()
-                    canonical_market = DataSourceFactory.normalize_market(market or "")
-                    if canonical_market and symbol and not display_name:
-                        raw = _safe_json_parse(row.get('raw_result'), {}) or {}
-                        raw_name = (raw.get('name') or '').strip() if isinstance(raw, dict) else ''
-                        if raw_name:
-                            display_name = raw_name
-                    if canonical_market and symbol and not display_name:
-                        candidates = [str(symbol).strip().upper()]
-                        if canonical_market == 'CNStock':
-                            candidates.append(normalize_cn_code(symbol))
-                        elif canonical_market == 'HKStock':
-                            candidates.append(normalize_hk_code(symbol))
-                        for cand in candidates:
-                            nm = symbol_seed.get((canonical_market, str(cand or '').strip().upper())) or ''
-                            if nm:
-                                display_name = nm
-                                break
-                    if canonical_market and symbol and (not display_name or display_name == symbol):
-                        key = (canonical_market, symbol)
-                        resolved = name_cache.get(key)
-                        if resolved is None:
-                            try:
-                                resolved = resolve_symbol_name(canonical_market, symbol) or ''
-                            except Exception:
-                                resolved = ''
-                            name_cache[key] = resolved
-                        if resolved:
-                            display_name = resolved
-
                     items.append({
                         "id": row['id'],
-                        "market": market,
-                        "symbol": symbol,
-                        "name": display_name,
+                        "market": row['market'],
+                        "symbol": row['symbol'],
                         "decision": row['decision'],
                         "confidence": row['confidence'],
                         "price": float(row['price_at_analysis']) if row['price_at_analysis'] else None,
@@ -509,11 +404,9 @@ class AnalysisMemory:
                 reasons = json.dumps([])
                 scores = json.dumps({})
                 indicators = json.dumps({})
-                default_name = (symbol or '').strip().upper()
                 raw = json.dumps({
                     "market": market,
                     "symbol": symbol,
-                    "name": default_name,
                     "language": language,
                     "model": model,
                     "timeframe": timeframe,
@@ -521,7 +414,7 @@ class AnalysisMemory:
                 })
                 cur.execute("""
                     INSERT INTO qd_analysis_memory (
-                        user_id, market, symbol, name, decision, confidence,
+                        user_id, market, symbol, decision, confidence,
                         summary, reasons, scores, indicators_snapshot, raw_result,
                         task_status, task_error, updated_at, created_at
                     ) VALUES (%s, %s, %s, %s, %s,
@@ -529,7 +422,7 @@ class AnalysisMemory:
                               %s, %s, NOW(), NOW())
                     RETURNING id
                 """, (
-                    user_id, market, symbol, default_name, "HOLD", 0,
+                    user_id, market, symbol, "HOLD", 0,
                     summary, reasons, scores, indicators, raw,
                     "processing", "",
                 ))
@@ -551,8 +444,7 @@ class AnalysisMemory:
                 cur = db.cursor()
                 cur.execute("""
                     UPDATE qd_analysis_memory
-                    SET name = %s,
-                        decision = %s,
+                    SET decision = %s,
                         confidence = %s,
                         price_at_analysis = %s,
                         summary = %s,
@@ -569,7 +461,6 @@ class AnalysisMemory:
                         updated_at = NOW()
                     WHERE id = %s
                 """, (
-                    (result.get("name") or "").strip() or None,
                     result.get("decision"),
                     result.get("confidence"),
                     result.get("market_data", {}).get("current_price"),

@@ -13,8 +13,6 @@ from app.utils.logger import get_logger
 from app.services.fast_analysis import get_fast_analysis_service
 from app.services.analysis_memory import get_analysis_memory
 from app.services.billing_service import get_billing_service
-from app.data_sources.factory import DataSourceFactory
-from app.services.symbol_name import normalize_crypto_symbol
 
 logger = get_logger(__name__)
 
@@ -43,7 +41,7 @@ def _try_refund_credits(user_id: int, amount: int, remark: str):
 
 def _run_async_analysis_task(task_memory_id: int, market: str, symbol: str, language: str,
                              model: str, timeframe: str, user_id: int, inflight_key: str,
-                             credits_charged: int = 0, name: str = ""):
+                             credits_charged: int = 0):
     """
     Background worker: execute analysis and update pending history record.
     """
@@ -51,13 +49,12 @@ def _run_async_analysis_task(task_memory_id: int, market: str, symbol: str, lang
         service = get_fast_analysis_service()
         memory = get_analysis_memory()
         result = service.analyze(
-            market=market, 
-            symbol=symbol, 
-            language=language, 
+            market=market,
+            symbol=symbol,
+            language=language,
             model=model,
             timeframe=timeframe,
-            user_id=user_id,
-            name=name
+            user_id=user_id
         )
         memory.finalize_pending_task(task_memory_id, result)
         if result.get("error"):
@@ -131,16 +128,12 @@ def analyze():
     try:
         data = request.get_json() or {}
         
-        market = DataSourceFactory.normalize_market((data.get('market') or '').strip())
-        symbol = (data.get('symbol') or '').strip().upper()
-        name = (data.get('name') or '').strip()
+        market = (data.get('market') or '').strip()
+        symbol = (data.get('symbol') or '').strip()
         language = data.get('language', 'en-US')
         model = data.get('model')
         timeframe = data.get('timeframe', '1D')
         async_submit = bool(data.get('async_submit', False))
-
-        if market == 'Crypto':
-            symbol = normalize_crypto_symbol(symbol)
         
         if not market or not symbol:
             return jsonify({
@@ -222,7 +215,7 @@ def analyze():
 
             t = threading.Thread(
                 target=_run_async_analysis_task,
-                args=(int(pending_id), market, symbol, language, model, timeframe, int(user_id), inflight_key, int(credits_charged or 0), name),
+                args=(int(pending_id), market, symbol, language, model, timeframe, int(user_id), inflight_key, int(credits_charged or 0)),
                 daemon=True
             )
             t.start()
@@ -245,13 +238,12 @@ def analyze():
             })
 
         result = service.analyze(
-            market=market, 
-            symbol=symbol, 
-            language=language, 
+            market=market,
+            symbol=symbol,
+            language=language,
             model=model,
             timeframe=timeframe,
-            user_id=user_id,
-            name=name
+            user_id=user_id
         )
         
         if result.get('error'):

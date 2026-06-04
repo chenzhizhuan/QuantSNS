@@ -20,17 +20,7 @@ _MARKET_ALIASES: Dict[str, str] = {
     "us_stocks": "USStock",
     "stock": "USStock",
     "cnstock": "CNStock",
-    "cn_stock": "CNStock",
-    "cn": "CNStock",
-    "china": "CNStock",
-    "ashare": "CNStock",
-    "a_share": "CNStock",
-    "a-share": "CNStock",
-    "a股": "CNStock",
     "hkstock": "HKStock",
-    "hk_stock": "HKStock",
-    "hk": "HKStock",
-    "hongkong": "HKStock",
     "futures": "Futures",
     "moex": "MOEX",
     "rustock": "MOEX",
@@ -242,3 +232,4 @@ class DataSourceFactory:
         except Exception as e:
             logger.error(f"Failed to fetch ticker {market}:{symbol} - {str(e)}")
             return {'last': 0, 'symbol': symbol}
+

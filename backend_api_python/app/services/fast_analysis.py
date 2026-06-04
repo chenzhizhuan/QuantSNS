@@ -18,8 +18,6 @@ from decimal import Decimal, ROUND_HALF_UP
 from app.utils.logger import get_logger
 from app.services.llm import LLMService
 from app.services.market_data_collector import get_market_data_collector
-from app.services.symbol_name import persist_seed_name, resolve_symbol_name
-from app.data_sources.tencent import normalize_cn_code, normalize_hk_code
 
 logger = get_logger(__name__)
 
@@ -904,7 +902,7 @@ IMPORTANT:
     # ==================== Main Analysis ====================
     
     def analyze(self, market: str, symbol: str, language: str = 'en-US', 
-                model: str = None, timeframe: str = "1D", user_id: int = None, name: str = None) -> Dict[str, Any]:
+                model: str = None, timeframe: str = "1D", user_id: int = None) -> Dict[str, Any]:
         """
         Run fast single-call analysis.
         
@@ -915,7 +913,6 @@ IMPORTANT:
             model: LLM model to use
             timeframe: Analysis timeframe (1D, 4H, etc.)
             user_id: User ID for storing analysis history
-            name: Explicit name of the symbol if available
         
         Returns:
             Complete analysis result with actionable recommendations.
@@ -930,7 +927,6 @@ IMPORTANT:
         result = {
             "market": market,
             "symbol": symbol,
-            "name": name,
             "language": language,
             "model": model,  # Include model in result from the start
             "timeframe": timeframe,
@@ -1453,52 +1449,6 @@ IMPORTANT:
                 "llm_time_ms": llm_time,
                 "data_collection_time_ms": data.get("collection_time_ms", 0),
             })
-
-            try:
-                company = data.get("company") or {}
-                company_name = (company.get("name") or "").strip()
-                def _is_placeholder_name(nm: str) -> bool:
-                    if not nm:
-                        return True
-                    up = nm.strip().upper()
-                    sym_up = str(symbol or "").strip().upper()
-                    if up == sym_up:
-                        return True
-                    if market == "CNStock":
-                        return up == str(normalize_cn_code(symbol) or "").strip().upper()
-                    if market == "HKStock":
-                        return up == str(normalize_hk_code(symbol) or "").strip().upper()
-                    return False
-
-                explicit_name = (result.get("name") or "").strip()
-                if _is_placeholder_name(explicit_name):
-                    explicit_name = ""
-
-                if _is_placeholder_name(company_name):
-                    company_name = ""
-
-                resolved_name = ""
-                if not explicit_name and not company_name and market in ("CNStock", "HKStock", "USStock"):
-                    resolved_name = (resolve_symbol_name(market, symbol) or "").strip()
-                    if _is_placeholder_name(resolved_name):
-                        resolved_name = ""
-
-                final_name = explicit_name or company_name or resolved_name
-                if not final_name:
-                    final_name = str(symbol or "").strip().upper()
-                if final_name:
-                    result["name"] = final_name
-                    if not _is_placeholder_name(final_name):
-                        persist_seed_name(market, symbol, final_name)
-                        if market == "CNStock":
-                            persist_seed_name(market, normalize_cn_code(symbol), final_name)
-                        elif market == "HKStock":
-                            persist_seed_name(market, normalize_hk_code(symbol), final_name)
-            except Exception:
-                pass
-
-            if not result.get("name"):
-                result["name"] = str(symbol or "").strip().upper()
             
             # Store in memory for future retrieval and get memory_id for feedback
             memory_id = self._store_analysis_memory(result, user_id=user_id)
