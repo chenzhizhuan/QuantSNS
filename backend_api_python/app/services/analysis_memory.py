@@ -309,11 +309,11 @@ class AnalysisMemory:
                 cur = db.cursor()
                 
                 # Build WHERE clause based on user_id
-                where_clause = "WHERE user_id = %s" if user_id else ""
+                where_clause = "WHERE m.user_id = %s" if user_id else ""
                 params_count = (user_id,) if user_id else ()
                 
                 # Get total count
-                cur.execute(f"SELECT COUNT(*) as cnt FROM qd_analysis_memory {where_clause}", params_count)
+                cur.execute(f"SELECT COUNT(*) as cnt FROM qd_analysis_memory m {where_clause}", params_count)
                 total_row = cur.fetchone()
                 total = total_row['cnt'] if total_row else 0
                 
@@ -321,13 +321,15 @@ class AnalysisMemory:
                 params = (user_id, page_size, offset) if user_id else (page_size, offset)
                 cur.execute(f"""
                     SELECT 
-                        id, market, symbol, decision, confidence, price_at_analysis,
-                        summary, reasons, scores, indicators_snapshot, raw_result,
-                        created_at, validated_at, was_correct, actual_return_pct,
-                        task_status, task_error, updated_at
-                    FROM qd_analysis_memory
+                        m.id, m.market, m.symbol, ms.name, m.decision, m.confidence, m.price_at_analysis,
+                        m.summary, m.reasons, m.scores, m.indicators_snapshot, m.raw_result,
+                        m.created_at, m.validated_at, m.was_correct, m.actual_return_pct,
+                        m.task_status, m.task_error, m.updated_at
+                    FROM qd_analysis_memory m
+                    LEFT JOIN qd_market_symbols ms
+                      ON ms.market = m.market AND ms.symbol = m.symbol
                     {where_clause}
-                    ORDER BY created_at DESC
+                    ORDER BY m.created_at DESC
                     LIMIT %s OFFSET %s
                 """, params)
                 
@@ -340,6 +342,7 @@ class AnalysisMemory:
                         "id": row['id'],
                         "market": row['market'],
                         "symbol": row['symbol'],
+                        "name": row.get('name') or '',
                         "decision": row['decision'],
                         "confidence": row['confidence'],
                         "price": float(row['price_at_analysis']) if row['price_at_analysis'] else None,
