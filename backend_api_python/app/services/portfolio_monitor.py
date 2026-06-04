@@ -298,7 +298,7 @@ def _analyze_single_position(pos: Dict[str, Any], language: str, user_id: int = 
         logger.info(f"Running fast AI analysis for {market}:{symbol} (user={user_id})")
         service = get_fast_analysis_service()
         analysis_result = service.analyze(
-            market=market, symbol=symbol, language=language, timeframe='1D',
+            market=market, symbol=symbol, name=name, language=language, timeframe='1D',
             user_id=user_id,
         )
 
