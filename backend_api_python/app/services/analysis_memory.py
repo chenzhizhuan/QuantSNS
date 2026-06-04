@@ -323,13 +323,15 @@ class AnalysisMemory:
                 params = (user_id, page_size, offset) if user_id else (page_size, offset)
                 cur.execute(f"""
                     SELECT 
-                        m.id, m.market, m.symbol, ms.name, m.decision, m.confidence, m.price_at_analysis,
+                        m.id, m.market, m.symbol, ms.name, wl.name AS watchlist_name, m.decision, m.confidence, m.price_at_analysis,
                         m.summary, m.reasons, m.scores, m.indicators_snapshot, m.raw_result,
                         m.created_at, m.validated_at, m.was_correct, m.actual_return_pct,
                         m.task_status, m.task_error, m.updated_at
                     FROM qd_analysis_memory m
                     LEFT JOIN qd_market_symbols ms
                       ON ms.market = m.market AND ms.symbol = m.symbol
+                    LEFT JOIN qd_watchlist wl
+                      ON wl.user_id = m.user_id AND wl.market = m.market AND wl.symbol = m.symbol
                     {where_clause}
                     ORDER BY m.created_at DESC
                     LIMIT %s OFFSET %s
@@ -343,7 +345,7 @@ class AnalysisMemory:
                 for row in rows:
                     market = row['market']
                     symbol = row['symbol']
-                    display_name = (row.get('name') or '').strip()
+                    display_name = (row.get('name') or row.get('watchlist_name') or '').strip()
                     canonical_market = DataSourceFactory.normalize_market(market or "")
                     if canonical_market and symbol and (not display_name or display_name == symbol):
                         key = (canonical_market, symbol)
