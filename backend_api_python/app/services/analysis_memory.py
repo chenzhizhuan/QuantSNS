@@ -42,17 +42,12 @@ class AnalysisMemory:
     def __init__(self):
         self._ensure_table()
 
-    def _attach_symbol_names(self, items: List[Dict[str, Any]], user_id: Optional[int] = None) -> None:
+    def _attach_symbol_names(self, items: List[Dict[str, Any]]) -> None:
         """
-        Attach display `name` into each history item as `name`.
-
-        Priority:
-        1) qd_watchlist.name (per-user, usually the most complete in early stage)
-        2) qd_market_symbols.name
+        Attach `qd_market_symbols.name` into each history item as `name`.
 
         Args:
             items: List of history item dicts. Each item should include `market` and `symbol`.
-            user_id: Optional current user id. If provided, will lookup qd_watchlist first.
         """
         if not items:
             return
@@ -85,49 +80,24 @@ class AnalysisMemory:
             with get_db_connection() as db:
                 cur = db.cursor()
                 try:
-                    if user_id:
-                        for market, symbols in market_to_symbols.items():
-                            sym_list = sorted(symbols)
-                            if not sym_list:
-                                continue
-                            placeholders = ','.join(['%s'] * len(sym_list))
-                            cur.execute(
-                                f"""
-                                SELECT market, UPPER(symbol) AS symbol_u, name
-                                FROM qd_watchlist
-                                WHERE user_id = %s AND market = %s AND UPPER(symbol) IN ({placeholders})
-                                """,
-                                (int(user_id), market, *sym_list),
-                            )
-                            rows = cur.fetchall() or []
-                            for row in rows:
-                                nm = (row.get('name') or '').strip()
-                                if nm:
-                                    name_map[(row.get('market'), (row.get('symbol_u') or '').upper())] = nm
-
                     for market, symbols in market_to_symbols.items():
                         sym_list = sorted(symbols)
                         if not sym_list:
                             continue
-                        missing = [s for s in sym_list if (market, s.upper()) not in name_map]
-                        if not missing:
-                            continue
-                        placeholders = ','.join(['%s'] * len(missing))
+                        placeholders = ','.join(['%s'] * len(sym_list))
                         cur.execute(
                             f"""
                             SELECT market, UPPER(symbol) AS symbol_u, name
                             FROM qd_market_symbols
                             WHERE market = %s AND UPPER(symbol) IN ({placeholders})
                             """,
-                            (market, *missing),
+                            (market, *sym_list),
                         )
                         rows = cur.fetchall() or []
                         for row in rows:
                             nm = (row.get('name') or '').strip()
                             if nm:
-                                key = (row.get('market'), (row.get('symbol_u') or '').upper())
-                                if key not in name_map:
-                                    name_map[key] = nm
+                                name_map[(row.get('market'), (row.get('symbol_u') or '').upper())] = nm
                 finally:
                     cur.close()
         except Exception as e:
@@ -473,7 +443,7 @@ class AnalysisMemory:
                         "actual_return_pct": float(row['actual_return_pct']) if row['actual_return_pct'] else None,
                     })
 
-                self._attach_symbol_names(items, user_id=user_id)
+                self._attach_symbol_names(items)
                 
                 return {
                     "items": items,
