@@ -18,7 +18,13 @@ from app.utils.cache import CacheManager
 from app.utils.db import get_db_connection
 from app.utils.config_loader import load_addon_config
 from app.utils.auth import login_required
-from app.data_sources.tencent import fetch_quote_batch, normalize_cn_code, normalize_hk_code, parse_quote_to_ticker
+from app.data_sources.tencent import (
+    fetch_quote,
+    fetch_quote_batch,
+    normalize_cn_code,
+    normalize_hk_code,
+    parse_quote_to_ticker,
+)
 from app.data.market_symbols_seed import (
     get_hot_symbols as seed_get_hot_symbols,
     search_symbols as seed_search_symbols,
@@ -723,6 +729,28 @@ def get_watchlist_prices():
             except Exception:
                 prefetched = {}
 
+        def _tencent_single_price(market: str, symbol: str) -> dict:
+            code = ''
+            if market == 'CNStock':
+                code = normalize_cn_code(symbol)
+            elif market == 'HKStock':
+                code = normalize_hk_code(symbol)
+            if not code:
+                return {'market': market, 'symbol': symbol, 'price': 0, 'change': 0, 'changePercent': 0}
+
+            parts = fetch_quote(code, timeout=6)
+            if not parts:
+                return {'market': market, 'symbol': symbol, 'price': 0, 'change': 0, 'changePercent': 0}
+
+            ticker = parse_quote_to_ticker(parts or [])
+            return {
+                'market': market,
+                'symbol': symbol,
+                'price': ticker.get('last', 0) or 0,
+                'change': ticker.get('change', 0) or 0,
+                'changePercent': ticker.get('changePercent', 0) or 0,
+            }
+
         def _parse_paging_float(raw: str, default: float) -> float:
             try:
                 return float(raw)
@@ -750,6 +778,11 @@ def get_watchlist_prices():
                 cached = prefetched.get(f"{market}:{symbol}")
                 if cached:
                     results.append(cached)
+                    continue
+
+                if market in ('CNStock', 'HKStock') and symbol:
+                    future = price_pool.submit(_tencent_single_price, market, symbol)
+                    futures[future] = (market, symbol)
                     continue
 
                 if market and symbol:
