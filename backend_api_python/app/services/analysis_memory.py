@@ -58,6 +58,7 @@ class AnalysisMemory:
                         user_id INT,
                         market VARCHAR(50) NOT NULL,
                         symbol VARCHAR(50) NOT NULL,
+                        name VARCHAR(255),
                         decision VARCHAR(10) NOT NULL,
                         confidence INT DEFAULT 50,
                         price_at_analysis DECIMAL(24, 8),
@@ -93,6 +94,13 @@ class AnalysisMemory:
                             WHERE table_name = 'qd_analysis_memory' AND column_name = 'user_id'
                         ) THEN
                             ALTER TABLE qd_analysis_memory ADD COLUMN user_id INT;
+                        END IF;
+
+                        IF NOT EXISTS (
+                            SELECT 1 FROM information_schema.columns
+                            WHERE table_name = 'qd_analysis_memory' AND column_name = 'name'
+                        ) THEN
+                            ALTER TABLE qd_analysis_memory ADD COLUMN name VARCHAR(255);
                         END IF;
                         
                         -- 添加 raw_result 列（如果不存在）
@@ -210,7 +218,7 @@ class AnalysisMemory:
                 
                 cur.execute("""
                     INSERT INTO qd_analysis_memory (
-                        user_id, market, symbol, decision, confidence,
+                        user_id, market, symbol, name, decision, confidence,
                         price_at_analysis, summary, reasons, scores, indicators_snapshot, raw_result,
                         consensus_score, consensus_abs, agreement_ratio, quality_multiplier,
                         task_status, task_error, updated_at
@@ -218,7 +226,7 @@ class AnalysisMemory:
                               %s, %s, %s, %s, %s, %s, NOW())
                     RETURNING id
                 """, (
-                    user_id, market, symbol, decision, confidence,
+                    user_id, market, symbol, (analysis_result.get("name") or "").strip() or None, decision, confidence,
                     price, summary, reasons, scores, indicators, raw,
                     consensus_score, consensus_abs, agreement_ratio, quality_multiplier,
                     "completed", "",
@@ -324,7 +332,7 @@ class AnalysisMemory:
                 params = (user_id, page_size, offset) if user_id else (page_size, offset)
                 cur.execute(f"""
                     SELECT 
-                        m.id, m.market, m.symbol, ms.name, wl.name AS watchlist_name, m.decision, m.confidence, m.price_at_analysis,
+                        m.id, m.market, m.symbol, m.name AS memory_name, ms.name, wl.name AS watchlist_name, m.decision, m.confidence, m.price_at_analysis,
                         m.summary, m.reasons, m.scores, m.indicators_snapshot, m.raw_result,
                         m.created_at, m.validated_at, m.was_correct, m.actual_return_pct,
                         m.task_status, m.task_error, m.updated_at
@@ -384,7 +392,7 @@ class AnalysisMemory:
                 for row in rows:
                     market = row['market']
                     symbol = row['symbol']
-                    display_name = (row.get('name') or row.get('watchlist_name') or '').strip()
+                    display_name = (row.get('memory_name') or row.get('name') or row.get('watchlist_name') or '').strip()
                     canonical_market = DataSourceFactory.normalize_market(market or "")
                     if canonical_market and symbol and not display_name:
                         raw = _safe_json_parse(row.get('raw_result'), {}) or {}
@@ -493,7 +501,7 @@ class AnalysisMemory:
                 })
                 cur.execute("""
                     INSERT INTO qd_analysis_memory (
-                        user_id, market, symbol, decision, confidence,
+                        user_id, market, symbol, name, decision, confidence,
                         summary, reasons, scores, indicators_snapshot, raw_result,
                         task_status, task_error, updated_at, created_at
                     ) VALUES (%s, %s, %s, %s, %s,
@@ -501,7 +509,7 @@ class AnalysisMemory:
                               %s, %s, NOW(), NOW())
                     RETURNING id
                 """, (
-                    user_id, market, symbol, "HOLD", 0,
+                    user_id, market, symbol, None, "HOLD", 0,
                     summary, reasons, scores, indicators, raw,
                     "processing", "",
                 ))
@@ -523,7 +531,8 @@ class AnalysisMemory:
                 cur = db.cursor()
                 cur.execute("""
                     UPDATE qd_analysis_memory
-                    SET decision = %s,
+                    SET name = %s,
+                        decision = %s,
                         confidence = %s,
                         price_at_analysis = %s,
                         summary = %s,
@@ -540,6 +549,7 @@ class AnalysisMemory:
                         updated_at = NOW()
                     WHERE id = %s
                 """, (
+                    (result.get("name") or "").strip() or None,
                     result.get("decision"),
                     result.get("confidence"),
                     result.get("market_data", {}).get("current_price"),
