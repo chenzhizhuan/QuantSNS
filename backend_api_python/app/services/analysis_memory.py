@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 
 from app.utils.logger import get_logger
 from app.utils.db import get_db_connection
+from app.services.symbol_name import resolve_symbol_name, seed_get_symbol_name
 
 logger = get_logger(__name__)
 
@@ -337,12 +338,28 @@ class AnalysisMemory:
                 cur.close()
                 
                 items = []
+                name_cache: Dict[tuple, str] = {}
                 for row in rows:
+                    market = row['market']
+                    symbol = row['symbol']
+                    display_name = (row.get('name') or '').strip()
+                    if market and symbol and (not display_name or display_name == symbol):
+                        key = (market, symbol)
+                        resolved = name_cache.get(key)
+                        if resolved is None:
+                            try:
+                                resolved = resolve_symbol_name(market, symbol) or seed_get_symbol_name(market, symbol) or ''
+                            except Exception:
+                                resolved = ''
+                            name_cache[key] = resolved
+                        if resolved:
+                            display_name = resolved
+
                     items.append({
                         "id": row['id'],
-                        "market": row['market'],
-                        "symbol": row['symbol'],
-                        "name": row.get('name') or '',
+                        "market": market,
+                        "symbol": symbol,
+                        "name": display_name,
                         "decision": row['decision'],
                         "confidence": row['confidence'],
                         "price": float(row['price_at_analysis']) if row['price_at_analysis'] else None,
