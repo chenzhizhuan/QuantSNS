@@ -18,6 +18,7 @@ from app.utils.cache import CacheManager
 from app.utils.db import get_db_connection
 from app.utils.config_loader import load_addon_config
 from app.utils.auth import login_required
+from app.data_sources.tencent import fetch_quote_batch, normalize_cn_code, normalize_hk_code, parse_quote_to_ticker
 from app.data.market_symbols_seed import (
     get_hot_symbols as seed_get_hot_symbols,
     search_symbols as seed_search_symbols,
@@ -686,20 +687,79 @@ def get_watchlist_prices():
                 'meta': {'total': total, 'limit': limit, 'offset': offset, 'all': fetch_all},
             })
 
+        prefetched: dict[str, dict] = {}
+        tencent_codes = []
+        tencent_code_map = {}
+        for item in watchlist:
+            market = item.get('market') or ''
+            symbol = item.get('symbol') or ''
+            code = ''
+            if market == 'CNStock':
+                code = normalize_cn_code(symbol)
+            elif market == 'HKStock':
+                code = normalize_hk_code(symbol)
+            if code:
+                c = (code or '').strip().lower()
+                if c:
+                    tencent_codes.append(c)
+                    tencent_code_map[c] = (market, symbol)
+
+        if tencent_codes:
+            try:
+                quote_map = fetch_quote_batch(tencent_codes, timeout=6)
+                for code, parts in quote_map.items():
+                    pair = tencent_code_map.get(code)
+                    if not pair:
+                        continue
+                    market, symbol = pair
+                    ticker = parse_quote_to_ticker(parts or [])
+                    prefetched[f"{market}:{symbol}"] = {
+                        'market': market,
+                        'symbol': symbol,
+                        'price': ticker.get('last', 0) or 0,
+                        'change': ticker.get('change', 0) or 0,
+                        'changePercent': ticker.get('changePercent', 0) or 0,
+                    }
+            except Exception:
+                prefetched = {}
+
+        def _parse_paging_float(raw: str, default: float) -> float:
+            try:
+                return float(raw)
+            except Exception:
+                return default
+
+        raw_workers = os.getenv("WATCHLIST_PRICES_WORKERS", "")
+        workers = _parse_paging_int(raw_workers, 20)
+        if workers <= 0:
+            workers = 20
+        workers = min(workers, 32, len(watchlist))
+        workers = max(workers, 6)
+
+        batch_timeout_sec = _parse_paging_float(os.getenv("WATCHLIST_PRICES_TIMEOUT_SEC", ""), 30.0)
+        if batch_timeout_sec <= 0:
+            batch_timeout_sec = 30.0
+
         results = []
         futures = {}
-        for item in watchlist:
-            market = item.get('market', '')
-            symbol = item.get('symbol', '')
+        with ThreadPoolExecutor(max_workers=workers) as price_pool:
+            for item in watchlist:
+                market = item.get('market', '')
+                symbol = item.get('symbol', '')
 
-            if market and symbol:
-                future = executor.submit(get_single_price, market, symbol)
-                futures[future] = (market, symbol)
+                cached = prefetched.get(f"{market}:{symbol}")
+                if cached:
+                    results.append(cached)
+                    continue
+
+                if market and symbol:
+                    future = price_pool.submit(get_single_price, market, symbol)
+                    futures[future] = (market, symbol)
         
         # 收集结果（带超时保护）
         completed_futures = set()
         try:
-            for future in as_completed(futures, timeout=30):
+            for future in as_completed(futures, timeout=batch_timeout_sec):
                 completed_futures.add(future)
                 try:
                     result = future.result()
