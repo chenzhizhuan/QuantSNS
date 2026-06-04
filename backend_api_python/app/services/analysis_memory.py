@@ -203,8 +203,11 @@ class AnalysisMemory:
                 symbol = analysis_result.get("symbol")
                 
                 name = (analysis_result.get("name") or "").strip()
-                if not name and market and symbol:
-                    name = resolve_symbol_name(market, symbol) or ""
+                # 如果 name 为空，或者 name 等于 symbol（说明 fast_analysis 没有解析到真实名称而使用了 fallback）
+                if (not name or name.upper() == str(symbol or "").strip().upper()) and market and symbol:
+                    resolved = resolve_symbol_name(market, symbol)
+                    if resolved and resolved.upper() != str(symbol).strip().upper():
+                        name = resolved
                 name = name.strip() or None
                 
                 decision = analysis_result.get("decision")
@@ -269,8 +272,8 @@ class AnalysisMemory:
                 days_int = int(days)
                 cur.execute("""
                     SELECT 
-                        id, decision, confidence, price_at_analysis,
-                        summary, reasons, scores,
+                        id, market, symbol, name, decision, confidence, price_at_analysis,
+                        summary, reasons, scores, raw_result,
                         created_at, validated_at, was_correct, actual_return_pct,
                         task_status, task_error, updated_at
                     FROM qd_analysis_memory
@@ -285,8 +288,18 @@ class AnalysisMemory:
                 
                 results = []
                 for row in rows:
+                    display_name = (row.get('name') or '').strip()
+                    if not display_name:
+                        raw = _safe_json_parse(row.get('raw_result'), {}) or {}
+                        raw_name = (raw.get('name') or '').strip() if isinstance(raw, dict) else ''
+                        if raw_name:
+                            display_name = raw_name
+                    if not display_name:
+                        display_name = resolve_symbol_name(market, symbol) or ""
+
                     results.append({
                         "id": row['id'],
+                        "name": display_name,
                         "decision": row['decision'],
                         "confidence": row['confidence'],
                         "price": float(row['price_at_analysis']) if row['price_at_analysis'] else None,
