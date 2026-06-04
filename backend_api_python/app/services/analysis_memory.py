@@ -201,6 +201,12 @@ class AnalysisMemory:
                 # 准备数据
                 market = analysis_result.get("market")
                 symbol = analysis_result.get("symbol")
+                
+                name = (analysis_result.get("name") or "").strip()
+                if not name and market and symbol:
+                    name = resolve_symbol_name(market, symbol) or ""
+                name = name.strip() or None
+                
                 decision = analysis_result.get("decision")
                 confidence = analysis_result.get("confidence")
                 price = analysis_result.get("market_data", {}).get("current_price")
@@ -223,10 +229,10 @@ class AnalysisMemory:
                         consensus_score, consensus_abs, agreement_ratio, quality_multiplier,
                         task_status, task_error, updated_at
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                              %s, %s, %s, %s, %s, %s, NOW())
+                              %s, %s, %s, %s, %s, %s, %s, NOW())
                     RETURNING id
                 """, (
-                    user_id, market, symbol, (analysis_result.get("name") or "").strip() or None, decision, confidence,
+                    user_id, market, symbol, name, decision, confidence,
                     price, summary, reasons, scores, indicators, raw,
                     consensus_score, consensus_abs, agreement_ratio, quality_multiplier,
                     "completed", "",
