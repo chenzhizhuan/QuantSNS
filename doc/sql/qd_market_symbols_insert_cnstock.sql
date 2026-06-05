@@ -13,6 +13,9 @@ DO UPDATE SET
     is_hot = EXCLUDED.is_hot,
     sort_order = EXCLUDED.sort_order;
 
+
+BEGIN;
+
 INSERT INTO public.qd_market_symbols (market, symbol, name, exchange, currency, is_active, is_hot, sort_order)
 VALUES
 ('CNStock', '600183', '生益科技', 'SSE', 'CNY', 1, 0, 0),
