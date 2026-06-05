@@ -13,7 +13,6 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-import re
 import requests
 
 from app.data_sources.rate_limiter import get_request_headers, retry_with_backoff, get_tencent_limiter
@@ -104,37 +103,6 @@ def fetch_quote(code: str, timeout: int = 8) -> Optional[List[str]]:
 
     parts = payload.split("~")
     return parts if len(parts) > 5 else None
-
-
-def fetch_quote_batch(codes: List[str], timeout: int = 8) -> Dict[str, List[str]]:
-    codes_in = [(_lower_code(c)) for c in (codes or []) if (_lower_code(c))]
-    if not codes_in:
-        return {}
-
-    limiter = get_tencent_limiter()
-    limiter.wait()
-    joined = ",".join(codes_in)
-    url = f"https://qt.gtimg.cn/q={joined}"
-    resp = requests.get(url, headers=get_request_headers(referer="https://qt.gtimg.cn/"), timeout=timeout)
-    try:
-        resp.encoding = "gbk"
-    except Exception:
-        pass
-
-    text = (resp.text or "").strip()
-    if not text:
-        return {}
-
-    out: Dict[str, List[str]] = {}
-    for m in re.finditer(r'v_([a-z0-9]+)="([^"]*)"', text, flags=re.IGNORECASE):
-        code = (m.group(1) or "").strip().lower()
-        payload = m.group(2) or ""
-        if not code or "~" not in payload:
-            continue
-        parts = payload.split("~")
-        if len(parts) > 5:
-            out[code] = parts
-    return out
 
 
 def parse_quote_to_ticker(parts: List[str]) -> Dict[str, Any]:
@@ -267,3 +235,4 @@ def fetch_kline(code: str, period: str, count: int = 300, adj: str = "qfq", time
         if isinstance(v, list) and v and str(k).lower().endswith(str(period).lower()):
             return v
     return []
+

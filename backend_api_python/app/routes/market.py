@@ -18,13 +18,6 @@ from app.utils.cache import CacheManager
 from app.utils.db import get_db_connection
 from app.utils.config_loader import load_addon_config
 from app.utils.auth import login_required
-from app.data_sources.tencent import (
-    fetch_quote,
-    fetch_quote_batch,
-    normalize_cn_code,
-    normalize_hk_code,
-    parse_quote_to_ticker,
-)
 from app.data.market_symbols_seed import (
     get_hot_symbols as seed_get_hot_symbols,
     search_symbols as seed_search_symbols,
@@ -639,44 +632,12 @@ def get_watchlist_prices():
                 legacy_count, user_id,
             )
 
-        all_param = (request.args.get("all") or "").strip().lower()
-        fetch_all = all_param in ("1", "true", "yes", "y")
-
-        def _parse_paging_int(raw: str, default: int) -> int:
-            try:
-                return int(raw)
-            except Exception:
-                return default
-
-        limit = None if fetch_all else _parse_paging_int(request.args.get("limit") or "", 50)
-        offset = 0 if fetch_all else _parse_paging_int(request.args.get("offset") or "", 0)
-
-        if limit is not None:
-            if limit <= 0:
-                limit = 50
-            limit = min(limit, 200)
-        if offset < 0:
-            offset = 0
-
         with get_db_connection() as db:
             cur = db.cursor()
             cur.execute(
-                "SELECT COUNT(1) AS cnt FROM qd_watchlist WHERE user_id = ?",
+                "SELECT market, symbol FROM qd_watchlist WHERE user_id = ?",
                 (user_id,),
             )
-            total_row = cur.fetchone() or {}
-            total = int(total_row.get("cnt") or 0)
-
-            if fetch_all:
-                cur.execute(
-                    "SELECT market, symbol FROM qd_watchlist WHERE user_id = ? ORDER BY id DESC",
-                    (user_id,),
-                )
-            else:
-                cur.execute(
-                    "SELECT market, symbol FROM qd_watchlist WHERE user_id = ? ORDER BY id DESC LIMIT ? OFFSET ?",
-                    (user_id, limit, offset),
-                )
             rows = cur.fetchall() or []
             cur.close()
 
@@ -686,113 +647,22 @@ def get_watchlist_prices():
         ]
 
         if not watchlist:
-            return jsonify({
-                'code': 1,
-                'msg': 'success',
-                'data': [],
-                'meta': {'total': total, 'limit': limit, 'offset': offset, 'all': fetch_all},
-            })
-
-        prefetched: dict[str, dict] = {}
-        tencent_codes = []
-        tencent_code_map = {}
-        for item in watchlist:
-            market = item.get('market') or ''
-            symbol = item.get('symbol') or ''
-            code = ''
-            if market == 'CNStock':
-                code = normalize_cn_code(symbol)
-            elif market == 'HKStock':
-                code = normalize_hk_code(symbol)
-            if code:
-                c = (code or '').strip().lower()
-                if c:
-                    tencent_codes.append(c)
-                    tencent_code_map[c] = (market, symbol)
-
-        if tencent_codes:
-            try:
-                quote_map = fetch_quote_batch(tencent_codes, timeout=6)
-                for code, parts in quote_map.items():
-                    pair = tencent_code_map.get(code)
-                    if not pair:
-                        continue
-                    market, symbol = pair
-                    ticker = parse_quote_to_ticker(parts or [])
-                    prefetched[f"{market}:{symbol}"] = {
-                        'market': market,
-                        'symbol': symbol,
-                        'price': ticker.get('last', 0) or 0,
-                        'change': ticker.get('change', 0) or 0,
-                        'changePercent': ticker.get('changePercent', 0) or 0,
-                    }
-            except Exception:
-                prefetched = {}
-
-        def _tencent_single_price(market: str, symbol: str) -> dict:
-            code = ''
-            if market == 'CNStock':
-                code = normalize_cn_code(symbol)
-            elif market == 'HKStock':
-                code = normalize_hk_code(symbol)
-            if not code:
-                return {'market': market, 'symbol': symbol, 'price': 0, 'change': 0, 'changePercent': 0}
-
-            parts = fetch_quote(code, timeout=6)
-            if not parts:
-                return {'market': market, 'symbol': symbol, 'price': 0, 'change': 0, 'changePercent': 0}
-
-            ticker = parse_quote_to_ticker(parts or [])
-            return {
-                'market': market,
-                'symbol': symbol,
-                'price': ticker.get('last', 0) or 0,
-                'change': ticker.get('change', 0) or 0,
-                'changePercent': ticker.get('changePercent', 0) or 0,
-            }
-
-        def _parse_paging_float(raw: str, default: float) -> float:
-            try:
-                return float(raw)
-            except Exception:
-                return default
-
-        raw_workers = os.getenv("WATCHLIST_PRICES_WORKERS", "")
-        workers = _parse_paging_int(raw_workers, 20)
-        if workers <= 0:
-            workers = 20
-        workers = min(workers, 32, len(watchlist))
-        workers = max(workers, 6)
-
-        batch_timeout_sec = _parse_paging_float(os.getenv("WATCHLIST_PRICES_TIMEOUT_SEC", ""), 30.0)
-        if batch_timeout_sec <= 0:
-            batch_timeout_sec = 30.0
+            return jsonify({'code': 1, 'msg': 'success', 'data': []})
 
         results = []
         futures = {}
-        with ThreadPoolExecutor(max_workers=workers) as price_pool:
-            for item in watchlist:
-                market = item.get('market', '')
-                symbol = item.get('symbol', '')
+        for item in watchlist:
+            market = item.get('market', '')
+            symbol = item.get('symbol', '')
 
-                cached = prefetched.get(f"{market}:{symbol}")
-                if cached:
-                    results.append(cached)
-                    continue
-
-                if market in ('CNStock', 'HKStock') and symbol:
-                    future = price_pool.submit(_tencent_single_price, market, symbol)
-                    futures[future] = (market, symbol)
-                    continue
-
-                if market and symbol:
-                    future = price_pool.submit(get_single_price, market, symbol)
-                    futures[future] = (market, symbol)
+            if market and symbol:
+                future = executor.submit(get_single_price, market, symbol)
+                futures[future] = (market, symbol)
         
         # 收集结果（带超时保护）
         completed_futures = set()
         try:
-            for future in as_completed(futures, timeout=batch_timeout_sec):
+            for future in as_completed(futures, timeout=30):
                 completed_futures.add(future)
                 try:
                     result = future.result()
@@ -807,7 +677,7 @@ def get_watchlist_prices():
                         'change': 0,
                         'changePercent': 0
                     })
-        except FuturesTimeoutError:
+        except TimeoutError:
             # 超时时，为未完成的任务添加默认结果
             for future, (market, symbol) in futures.items():
                 if future not in completed_futures:
@@ -822,16 +692,12 @@ def get_watchlist_prices():
                     })
         
         success_count = sum(1 for r in results if r.get('price', 0) > 0)
-        logger.info(
-            "Watchlist prices: %s/%s successful (user=%s, total=%s, limit=%s, offset=%s, all=%s)",
-            success_count, len(results), user_id, total, limit, offset, fetch_all,
-        )
+        logger.info(f"Watchlist prices: {success_count}/{len(results)} successful")
         
         return jsonify({
             'code': 1,
             'msg': 'success',
-            'data': results,
-            'meta': {'total': total, 'limit': limit, 'offset': offset, 'all': fetch_all},
+            'data': results
         })
         
     except Exception as e:
