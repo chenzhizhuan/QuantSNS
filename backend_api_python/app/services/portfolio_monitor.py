@@ -83,7 +83,7 @@ def _bump_monitor_schedule(
     (since the monitor didn't actually consume an analysis cycle), but we
     still push ``next_run_at`` forward so the loop does not keep firing the
     same monitor every 30 seconds while the underlying condition (no credits,
-    symbol removed from watchlist, etc.) persists.
+    symbol is not recognized in market symbols, etc.) persists.
     """
     try:
         interval = int(interval_minutes or 60)
@@ -1351,28 +1351,33 @@ def run_single_monitor(
             target_sym = config['symbol'].strip().upper()
             target_mkt = (config.get('market') or '').strip()
 
-            # Rule 4: symbol deleted from watchlist → skip
-            still_in_watchlist = False
+            # Rule 4: symbol not recognized in market symbols → skip
+            symbol_is_active = False
             try:
                 with get_db_connection() as db:
                     cur = db.cursor()
-                    wl_sql = "SELECT 1 FROM qd_watchlist WHERE user_id = ? AND UPPER(symbol) = ?"
-                    wl_args: list = [monitor_user_id, target_sym]
+                    ms_sql = """
+                        SELECT 1
+                        FROM qd_market_symbols
+                        WHERE is_active = 1
+                          AND UPPER(symbol) = ?
+                    """
+                    ms_args: list = [target_sym]
                     if target_mkt:
-                        wl_sql += " AND market = ?"
-                        wl_args.append(target_mkt)
-                    wl_sql += " LIMIT 1"
-                    cur.execute(wl_sql, tuple(wl_args))
-                    still_in_watchlist = cur.fetchone() is not None
+                        ms_sql += " AND market = ?"
+                        ms_args.append(target_mkt)
+                    ms_sql += " LIMIT 1"
+                    cur.execute(ms_sql, tuple(ms_args))
+                    symbol_is_active = cur.fetchone() is not None
                     cur.close()
             except Exception as e:
-                logger.warning(f"Monitor #{monitor_id} watchlist check failed: {e}")
+                logger.warning(f"Monitor #{monitor_id} market_symbols check failed: {e}")
 
-            if not still_in_watchlist:
-                logger.info(f"Monitor #{monitor_id} skipped: {target_mkt}:{target_sym} removed from watchlist")
+            if not symbol_is_active:
+                logger.info(f"Monitor #{monitor_id} skipped: {target_mkt}:{target_sym} not found in market symbols")
                 skip_result = {
                     'success': False,
-                    'error': 'Symbol removed from watchlist',
+                    'error': 'Symbol not found in market symbols',
                     'skipped': True,
                     'timestamp': _now_ts(),
                 }
