@@ -6,7 +6,6 @@ info:
     url: https://github.com/brokermr810/quantdinger
   license:
     name: See repository LICENSE
-  x-api-app-version: 3.0.22
   title: QuantDinger Web API
   version: 1.0.0
 components:

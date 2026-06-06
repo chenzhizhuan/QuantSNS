@@ -25,6 +25,7 @@ def local_temp_dir() -> Iterator[Path]:
 def test_normalize_version_accepts_common_tag_formats():
     assert normalize_version("v3.0.23") == "3.0.23"
     assert normalize_version("refs/tags/v3.0.23") == "3.0.23"
+    assert normalize_version("refs/heads/main") == "main"
     assert normalize_version("3.0.23") == "3.0.23"
 
 
@@ -69,6 +70,16 @@ def test_floating_tag_falls_back_to_version_file():
 
         assert (
             resolve_app_version({"GIT_TAG": "latest"}, repo_root=tmp_path, app_root=tmp_path, use_git=False)
+            == "3.0.22"
+        )
+
+
+def test_branch_ref_falls_back_to_version_file():
+    with local_temp_dir() as tmp_path:
+        (tmp_path / "VERSION").write_text("3.0.22\n", encoding="utf-8")
+
+        assert (
+            resolve_app_version({"GITHUB_REF": "refs/heads/main"}, repo_root=tmp_path, app_root=tmp_path, use_git=False)
             == "3.0.22"
         )
 

@@ -14,6 +14,7 @@ from pathlib import Path
 
 FALLBACK_VERSION = "0.0.0-dev"
 TAG_REF_PREFIX = "refs/tags/"
+BRANCH_REF_PREFIX = "refs/heads/"
 
 
 def normalize_version(value: object) -> str:
@@ -23,6 +24,8 @@ def normalize_version(value: object) -> str:
         return ""
     if text.startswith(TAG_REF_PREFIX):
         text = text[len(TAG_REF_PREFIX) :]
+    elif text.startswith(BRANCH_REF_PREFIX):
+        text = text[len(BRANCH_REF_PREFIX) :]
     if text.startswith("v") and len(text) > 1 and text[1].isdigit():
         text = text[1:]
     return text
