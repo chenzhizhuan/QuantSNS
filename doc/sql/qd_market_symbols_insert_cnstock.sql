@@ -32,3 +32,23 @@ DO UPDATE SET
     sort_order = EXCLUDED.sort_order;
 
 COMMIT;
+
+
+BEGIN;
+
+INSERT INTO public.qd_market_symbols (market, symbol, name, exchange, currency, is_active, is_hot, sort_order)
+VALUES
+('CNStock', '300408', '三环集团', 'SZSE', 'CNY', 1, 0, 0),
+('CNStock', '002484', '江海股份', 'SZSE', 'CNY', 1, 0, 0),
+('CNStock', '002636', '金安国纪', 'SZSE', 'CNY', 1, 0, 0),
+('CNStock', '300042', '朗科科技', 'SZSE', 'CNY', 1, 0, 0)
+ON CONFLICT (market, symbol)
+DO UPDATE SET
+    name = EXCLUDED.name,
+    exchange = EXCLUDED.exchange,
+    currency = EXCLUDED.currency,
+    is_active = EXCLUDED.is_active,
+    is_hot = EXCLUDED.is_hot,
+    sort_order = EXCLUDED.sort_order;
+
+COMMIT;
