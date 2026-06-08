@@ -376,7 +376,16 @@ class AnalysisMemory:
             logger.error(f"Failed to get recent memories: {e}")
             return []
 
-    def get_all_history(self, user_id: int = None, page: int = 1, page_size: int = 20) -> Dict:
+    def get_all_history(
+        self,
+        user_id: int = None,
+        page: int = 1,
+        page_size: int = 20,
+        dedupe_latest_by_symbol: bool = False,
+        fetch_all: bool = False,
+        decision: str = None,
+        order_by: str = "time",
+    ) -> Dict:
         """
         Get all analysis history with pagination.
         
@@ -384,44 +393,174 @@ class AnalysisMemory:
             user_id: User ID filter (required to show only user's own history)
             page: Page number (1-indexed)
             page_size: Items per page
+            dedupe_latest_by_symbol: When True, keep only the latest record per (market, symbol)
+            fetch_all: When True, ignore pagination and return all rows (optionally deduped)
         
         Returns:
             Dict with items list and total count
         """
         try:
-            offset = (page - 1) * page_size
-            
             with get_db_connection() as db:
                 cur = db.cursor()
                 
-                # Build WHERE clause based on user_id
-                where_clause = "WHERE user_id = %s" if user_id else ""
-                params_count = (user_id,) if user_id else ()
-                
-                # Get total count
-                cur.execute(f"SELECT COUNT(*) as cnt FROM qd_analysis_memory {where_clause}", params_count)
+                clauses = []
+                params_list = []
+                if user_id:
+                    clauses.append("user_id = %s")
+                    params_list.append(user_id)
+                if decision:
+                    clauses.append("decision = %s")
+                    params_list.append(decision)
+                where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+                params_count = tuple(params_list)
+
+                if dedupe_latest_by_symbol:
+                    cur.execute(
+                        f"""
+                        SELECT COUNT(*) as cnt
+                        FROM (
+                            SELECT DISTINCT ON (market, symbol) market, symbol
+                            FROM qd_analysis_memory
+                            {where_clause}
+                            ORDER BY market, symbol, created_at DESC
+                        ) t
+                        """,
+                        params_count,
+                    )
+                else:
+                    cur.execute(f"SELECT COUNT(*) as cnt FROM qd_analysis_memory {where_clause}", params_count)
+
                 total_row = cur.fetchone()
-                total = total_row['cnt'] if total_row else 0
-                
-                # Get paginated results
-                params = (user_id, page_size, offset) if user_id else (page_size, offset)
-                cur.execute(f"""
-                    SELECT 
+                total = total_row["cnt"] if total_row else 0
+
+                if order_by == "confidence":
+                    order_sql = "confidence DESC, created_at DESC"
+                elif order_by == "strength":
+                    order_sql = "((COALESCE(consensus_abs, 0) * (COALESCE(confidence, 0) / 100.0) * COALESCE(NULLIF(quality_multiplier, 0), 1))) DESC, created_at DESC"
+                else:
+                    order_sql = "created_at DESC"
+
+                has_strength_cols = True
+                has_task_cols = True
+
+                base_select = """
+                    SELECT
                         id, market, symbol, decision, confidence, price_at_analysis,
+                        consensus_score, consensus_abs, agreement_ratio, quality_multiplier,
                         summary, reasons, scores, indicators_snapshot, raw_result,
                         created_at, validated_at, was_correct, actual_return_pct,
                         task_status, task_error, updated_at
-                    FROM qd_analysis_memory
-                    {where_clause}
-                    ORDER BY created_at DESC
-                    LIMIT %s OFFSET %s
-                """, params)
+                """
+
+                if dedupe_latest_by_symbol:
+                    from_sql = f"""
+                        FROM (
+                            SELECT DISTINCT ON (market, symbol)
+                                id, market, symbol, decision, confidence, price_at_analysis,
+                                consensus_score, consensus_abs, agreement_ratio, quality_multiplier,
+                                summary, reasons, scores, indicators_snapshot, raw_result,
+                                created_at, validated_at, was_correct, actual_return_pct,
+                                task_status, task_error, updated_at
+                            FROM qd_analysis_memory
+                            {where_clause}
+                            ORDER BY market, symbol, created_at DESC
+                        ) q
+                    """
+                else:
+                    from_sql = f"""
+                        FROM qd_analysis_memory
+                        {where_clause}
+                    """
+
+                try:
+                    if fetch_all:
+                        cur.execute(
+                            f"""
+                            {base_select}
+                            {from_sql}
+                            ORDER BY {order_sql}
+                            """,
+                            params_count,
+                        )
+                    else:
+                        offset = (page - 1) * page_size
+                        params = (*params_count, page_size, offset)
+                        cur.execute(
+                            f"""
+                            {base_select}
+                            {from_sql}
+                            ORDER BY {order_sql}
+                            LIMIT %s OFFSET %s
+                            """,
+                            params,
+                        )
+                except Exception as qe:
+                    msg = str(qe).lower()
+                    if "does not exist" not in msg:
+                        raise
+
+                    has_strength_cols = False
+                    has_task_cols = False
+                    legacy_order_sql = order_sql if order_by == "confidence" else "created_at DESC"
+                    legacy_select = """
+                        SELECT
+                            id, market, symbol, decision, confidence, price_at_analysis,
+                            summary, reasons, scores, indicators_snapshot, raw_result,
+                            created_at, validated_at, was_correct, actual_return_pct
+                    """
+
+                    if dedupe_latest_by_symbol:
+                        legacy_from_sql = f"""
+                            FROM (
+                                SELECT DISTINCT ON (market, symbol)
+                                    id, market, symbol, decision, confidence, price_at_analysis,
+                                    summary, reasons, scores, indicators_snapshot, raw_result,
+                                    created_at, validated_at, was_correct, actual_return_pct
+                                FROM qd_analysis_memory
+                                {where_clause}
+                                ORDER BY market, symbol, created_at DESC
+                            ) q
+                        """
+                    else:
+                        legacy_from_sql = f"""
+                            FROM qd_analysis_memory
+                            {where_clause}
+                        """
+
+                    if fetch_all:
+                        cur.execute(
+                            f"""
+                            {legacy_select}
+                            {legacy_from_sql}
+                            ORDER BY {legacy_order_sql}
+                            """,
+                            params_count,
+                        )
+                    else:
+                        offset = (page - 1) * page_size
+                        params = (*params_count, page_size, offset)
+                        cur.execute(
+                            f"""
+                            {legacy_select}
+                            {legacy_from_sql}
+                            ORDER BY {legacy_order_sql}
+                            LIMIT %s OFFSET %s
+                            """,
+                            params,
+                        )
                 
                 rows = cur.fetchall() or []
                 cur.close()
                 
                 items = []
                 for row in rows:
+                    conf_val = float(row.get('confidence') or 0)
+                    abs_val = float(row.get('consensus_abs') or 0) if has_strength_cols else 0.0
+                    q_val_raw = row.get('quality_multiplier') if has_strength_cols else None
+                    q_val = float(q_val_raw) if q_val_raw is not None else 1.0
+                    if q_val <= 0:
+                        q_val = 1.0
+                    strength = abs_val * (conf_val / 100.0) * q_val
                     items.append({
                         "id": row['id'],
                         "market": row['market'],
@@ -430,15 +569,20 @@ class AnalysisMemory:
                         "decision": row['decision'],
                         "confidence": row['confidence'],
                         "price": float(row['price_at_analysis']) if row['price_at_analysis'] else None,
+                        "consensus_score": float(row['consensus_score']) if has_strength_cols and row.get('consensus_score') is not None else None,
+                        "consensus_abs": float(row['consensus_abs']) if has_strength_cols and row.get('consensus_abs') is not None else None,
+                        "agreement_ratio": float(row['agreement_ratio']) if has_strength_cols and row.get('agreement_ratio') is not None else None,
+                        "quality_multiplier": float(row['quality_multiplier']) if has_strength_cols and row.get('quality_multiplier') is not None else None,
+                        "strength": strength,
                         "summary": row['summary'],
                         "reasons": _safe_json_parse(row['reasons'], []),
                         "scores": _safe_json_parse(row['scores'], {}),
                         "indicators": _safe_json_parse(row['indicators_snapshot'], {}),
                         "full_result": _safe_json_parse(row['raw_result'], None),
-                        "status": row.get('task_status') or 'completed',
-                        "error_message": row.get('task_error') or '',
+                        "status": (row.get('task_status') if has_task_cols else None) or 'completed',
+                        "error_message": (row.get('task_error') if has_task_cols else None) or '',
                         "created_at": row['created_at'].isoformat() if row['created_at'] else None,
-                        "updated_at": row['updated_at'].isoformat() if row.get('updated_at') else None,
+                        "updated_at": row['updated_at'].isoformat() if has_task_cols and row.get('updated_at') else None,
                         "was_correct": row['was_correct'],
                         "actual_return_pct": float(row['actual_return_pct']) if row['actual_return_pct'] else None,
                     })
@@ -448,8 +592,8 @@ class AnalysisMemory:
                 return {
                     "items": items,
                     "total": total,
-                    "page": page,
-                    "page_size": page_size
+                    "page": 1 if fetch_all else page,
+                    "page_size": len(items) if fetch_all else page_size,
                 }
                 
         except Exception as e:

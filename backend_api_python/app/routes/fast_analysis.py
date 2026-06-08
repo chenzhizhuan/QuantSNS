@@ -359,13 +359,49 @@ def get_all_history():
     """
     try:
         page = int(request.args.get('page', 1))
-        pagesize = min(int(request.args.get('pagesize', 20)), 50)
+        if page < 1:
+            page = 1
+        scene = (request.args.get('scene') or '').strip()
+
+        dedupe_latest_by_symbol = str(request.args.get('dedupe', '')).strip().lower() in ('1', 'true', 'yes', 'y', 'on')
+        fetch_all = str(request.args.get('all', '')).strip().lower() in ('1', 'true', 'yes', 'y', 'on')
+        order_by = (request.args.get('order_by') or '').strip() or 'time'
+        decision = (request.args.get('decision') or '').strip().upper() or None
+        tab = (request.args.get('tab') or '').strip()
+
+        max_pagesize = 50
+        if scene == 'signal_board':
+            max_pagesize = 200
+            dedupe_latest_by_symbol = True
+            fetch_all = False
+            if tab == 'long':
+                decision = 'BUY'
+            elif tab == 'short':
+                decision = 'SELL'
+            elif tab == 'confidence':
+                decision = None
+                order_by = 'confidence'
+            else:
+                order_by = 'strength'
+
+        pagesize = int(request.args.get('pagesize', 20))
+        if pagesize < 1:
+            pagesize = 1
+        pagesize = min(pagesize, max_pagesize)
         
         # Get current user's ID to filter history
         user_id = getattr(g, 'user_id', None)
         
         memory = get_analysis_memory()
-        result = memory.get_all_history(user_id=user_id, page=page, page_size=pagesize)
+        result = memory.get_all_history(
+            user_id=user_id,
+            page=page,
+            page_size=pagesize,
+            dedupe_latest_by_symbol=dedupe_latest_by_symbol,
+            fetch_all=fetch_all,
+            decision=decision,
+            order_by=order_by,
+        )
         
         return jsonify({
             'code': 1,
