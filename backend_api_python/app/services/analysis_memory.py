@@ -385,6 +385,7 @@ class AnalysisMemory:
         fetch_all: bool = False,
         decision: str = None,
         order_by: str = "time",
+        apply_decision_after_dedupe: bool = False,
     ) -> Dict:
         """
         Get all analysis history with pagination.
@@ -403,29 +404,43 @@ class AnalysisMemory:
             with get_db_connection() as db:
                 cur = db.cursor()
                 
-                clauses = []
-                params_list = []
+                base_clauses = []
+                base_params_list = []
                 if user_id:
-                    clauses.append("user_id = %s")
-                    params_list.append(user_id)
-                if decision:
-                    clauses.append("decision = %s")
-                    params_list.append(decision)
-                where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-                params_count = tuple(params_list)
+                    base_clauses.append("user_id = %s")
+                    base_params_list.append(user_id)
+
+                # For signal board tabs, dedupe must happen first so long/short reflects
+                # the symbol's latest overall signal instead of the latest BUY/SELL subset.
+                use_post_dedupe_decision = bool(decision) and dedupe_latest_by_symbol and apply_decision_after_dedupe
+                if decision and not use_post_dedupe_decision:
+                    base_clauses.append("decision = %s")
+                    base_params_list.append(decision)
+
+                post_clauses = []
+                post_params_list = []
+                if use_post_dedupe_decision:
+                    post_clauses.append("decision = %s")
+                    post_params_list.append(decision)
+
+                where_clause = f"WHERE {' AND '.join(base_clauses)}" if base_clauses else ""
+                post_where_clause = f"WHERE {' AND '.join(post_clauses)}" if post_clauses else ""
+                params_count = tuple(base_params_list)
+                params_outer = (*params_count, *tuple(post_params_list))
 
                 if dedupe_latest_by_symbol:
                     cur.execute(
                         f"""
                         SELECT COUNT(*) as cnt
                         FROM (
-                            SELECT DISTINCT ON (market, symbol) market, symbol
+                            SELECT DISTINCT ON (market, symbol) market, symbol, decision
                             FROM qd_analysis_memory
                             {where_clause}
                             ORDER BY market, symbol, created_at DESC
                         ) t
+                        {post_where_clause}
                         """,
-                        params_count,
+                        params_outer,
                     )
                 else:
                     cur.execute(f"SELECT COUNT(*) as cnt FROM qd_analysis_memory {where_clause}", params_count)
@@ -465,6 +480,7 @@ class AnalysisMemory:
                             {where_clause}
                             ORDER BY market, symbol, created_at DESC
                         ) q
+                        {post_where_clause}
                     """
                 else:
                     from_sql = f"""
@@ -480,11 +496,11 @@ class AnalysisMemory:
                             {from_sql}
                             ORDER BY {order_sql}
                             """,
-                            params_count,
+                            params_outer if dedupe_latest_by_symbol else params_count,
                         )
                     else:
                         offset = (page - 1) * page_size
-                        params = (*params_count, page_size, offset)
+                        params = (*(params_outer if dedupe_latest_by_symbol else params_count), page_size, offset)
                         cur.execute(
                             f"""
                             {base_select}
@@ -520,6 +536,7 @@ class AnalysisMemory:
                                 {where_clause}
                                 ORDER BY market, symbol, created_at DESC
                             ) q
+                            {post_where_clause}
                         """
                     else:
                         legacy_from_sql = f"""
@@ -534,11 +551,11 @@ class AnalysisMemory:
                             {legacy_from_sql}
                             ORDER BY {legacy_order_sql}
                             """,
-                            params_count,
+                            params_outer if dedupe_latest_by_symbol else params_count,
                         )
                     else:
                         offset = (page - 1) * page_size
-                        params = (*params_count, page_size, offset)
+                        params = (*(params_outer if dedupe_latest_by_symbol else params_count), page_size, offset)
                         cur.execute(
                             f"""
                             {legacy_select}

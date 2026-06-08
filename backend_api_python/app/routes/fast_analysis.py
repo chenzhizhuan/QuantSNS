@@ -362,6 +362,7 @@ def get_all_history():
         if page < 1:
             page = 1
         scene = (request.args.get('scene') or '').strip()
+        apply_decision_after_dedupe = False
 
         dedupe_latest_by_symbol = str(request.args.get('dedupe', '')).strip().lower() in ('1', 'true', 'yes', 'y', 'on')
         fetch_all = str(request.args.get('all', '')).strip().lower() in ('1', 'true', 'yes', 'y', 'on')
@@ -374,10 +375,13 @@ def get_all_history():
             max_pagesize = 200
             dedupe_latest_by_symbol = True
             fetch_all = False
+            apply_decision_after_dedupe = True
             if tab == 'long':
                 decision = 'BUY'
+                order_by = 'strength'
             elif tab == 'short':
                 decision = 'SELL'
+                order_by = 'strength'
             elif tab == 'confidence':
                 decision = None
                 order_by = 'confidence'
@@ -401,6 +405,7 @@ def get_all_history():
             fetch_all=fetch_all,
             decision=decision,
             order_by=order_by,
+            apply_decision_after_dedupe=apply_decision_after_dedupe,
         )
         
         return jsonify({
