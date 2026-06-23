@@ -22,6 +22,7 @@
 # Environment & Secrets
 # ========================
 .env
+.env.bak
 .env.local
 .env.*.local
 backend_api_python/.env
