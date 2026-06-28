@@ -600,7 +600,6 @@ class SignalNotifier:
         user_id: int = None,
     ) -> Tuple[bool, str]:
         try:
-            now = int(time.time())
             # Get user_id from strategy if not provided
             if user_id is None:
                 if strategy_id is not None:

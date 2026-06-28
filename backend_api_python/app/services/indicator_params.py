@@ -11,7 +11,6 @@ Indicator Parameters Parser and Helper Functions
 """
 
 import re
-import json
 from typing import Dict, Any, List, Optional, Tuple, TYPE_CHECKING
 from app.utils.logger import get_logger
 from app.utils.db import get_db_connection

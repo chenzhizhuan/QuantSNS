@@ -609,7 +609,6 @@ class StrategyReviewService:
         recommendations: List[Dict[str, Any]] = []
         language_norm = str(language or "").lower()
         is_zh = language_norm.startswith("zh")
-        is_zh_tw = is_zh and ("tw" in language_norm or "hant" in language_norm)
 
         def text(en: str, zh: str) -> str:
             return zh if is_zh else en

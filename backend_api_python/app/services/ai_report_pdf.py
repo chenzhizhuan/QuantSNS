@@ -1,7 +1,6 @@
 """PDF rendering for AI Copilot research reports."""
 
 import json
-import os
 import re
 from datetime import datetime, timezone
 from io import BytesIO

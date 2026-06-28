@@ -12,7 +12,6 @@ except Exception:
 from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime
 import json
-from decimal import Decimal, ROUND_DOWN, ROUND_UP
 import pandas as pd
 import numpy as np
 
@@ -4829,7 +4828,6 @@ class TradingExecutor:
     ) -> None:
         """Persist a best-effort browser notification row for the frontend panel."""
         try:
-            now = int(time.time())
             # Get user_id from strategy if not provided
             if user_id is None:
                 try:
@@ -5715,10 +5713,9 @@ class TradingExecutor:
         timeframe = trading_config.get('timeframe', '1H')
         rebalance_frequency = trading_config.get('rebalance_frequency', 'daily')
         tick_interval_sec = int(trading_config.get('decide_interval', 300))
-        
+
         last_tick_time = 0
-        last_rebalance_time = 0
-        
+
         while True:
             try:
                 if not self._is_strategy_running(strategy_id):
@@ -5746,7 +5743,7 @@ class TradingExecutor:
                 )
                 
                 if not result:
-                    logger.warning(f"Cross-sectional indicator returned no result")
+                    logger.warning("Cross-sectional indicator returned no result")
                     continue
                 
                 signals = self._generate_cross_sectional_signals(
@@ -5803,8 +5800,7 @@ class TradingExecutor:
                             logger.error(f"Failed to execute signal {signal['symbol']} {signal['type']}: {e}")
                 
                 self._update_last_rebalance(strategy_id)
-                last_rebalance_time = current_time
-                
+
             except Exception as e:
                 logger.error(f"Cross-sectional strategy loop error: {e}")
                 logger.error(traceback.format_exc())

@@ -4,7 +4,7 @@ Manages manual positions (user's existing holdings) and AI monitoring tasks.
 """
 from flask import g, jsonify, request
 from app.openapi.blueprint import HumanBlueprint as Blueprint
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 import json
 import traceback
 import time
