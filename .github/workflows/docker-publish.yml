@@ -3,7 +3,7 @@ name: Publish backend image to GHCR
 # Build and publish the backend image to GitHub Container Registry, then
 # (for v* tags only) cut a GitHub Release with the auto-generated changelog.
 # The frontend image is built and released independently by the private
-# QuantDinger-Vue repo (see its release-frontend.yml).
+# QuantSNS-Vue repo (see its release-frontend.yml).
 #
 # Triggers:
 #   - push of a version tag matching `v*` (e.g. v3.0.9) → publishes

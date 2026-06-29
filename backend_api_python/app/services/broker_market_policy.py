@@ -11,8 +11,8 @@ Centralizing the matrix prevents the previous bug pattern where the same
 ways in:
   - app/services/strategy.py (create / update / batch validators)
   - app/services/pending_order_worker.py (live execution gate)
-  - QuantDinger-Vue-src/src/views/trading-assistant/index.vue (UI guard)
-  - QuantDinger-Vue-src/src/views/trading-bot/components/BotCreateWizard.vue (bot guard)
+  - QuantSNS-Vue-src/src/views/trading-assistant/index.vue (UI guard)
+  - QuantSNS-Vue-src/src/views/trading-bot/components/BotCreateWizard.vue (bot guard)
 
 Adding a new broker now means updating BROKER_MARKETS here, plus the
 broker's client implementation. Everything else picks it up automatically.

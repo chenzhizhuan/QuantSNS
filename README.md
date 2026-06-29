@@ -206,8 +206,8 @@ This repo ships the **backend**, **Docker Compose** stack, and **documentation**
 | Repository | What it is |
 |------------|------------|
 | **[QuantDinger](https://github.com/brokermr810/QuantDinger)** (this repo) | Backend (Flask/Python), Compose stack, docs |
-| **[QuantDinger-Vue](https://github.com/brokermr810/QuantDinger-Vue)** | **Web frontend source** (Vue) — tagging `v*` publishes `ghcr.io/brokermr810/quantdinger-frontend` automatically |
-| **[QuantDinger-Mobile](https://github.com/brokermr810/QuantDinger-Mobile)** | **Mobile + H5 client** — Compose serves the H5 image at `http://localhost:8889`; the repo also builds native shells |
+| **[QuantSNS-Vue](https://github.com/brokermr810/QuantSNS-Vue)** | **Web frontend source** (Vue) — tagging `v*` publishes `ghcr.io/brokermr810/quantdinger-frontend` automatically |
+| **[QuantSNS-Mobile](https://github.com/brokermr810/QuantSNS-Mobile)** | **Mobile + H5 client** — Compose serves the H5 image at `http://localhost:8889`; the repo also builds native shells |
 
 **Note:** Node.js is only required if you build the web or mobile UI from source; the default Docker quick start pulls the published images and does not need it. For source builds, use **Node 22 LTS** as the shared local version: the mobile H5 repo requires Node **20.19+ or 22.12+** (Vite 7), and the desktop web repo also works on Node 22.
 
@@ -405,7 +405,7 @@ docker compose up -d
 
 - **`frontend`** — pulls `ghcr.io/brokermr810/quantdinger-frontend:latest` (no local Vue tree required).
 - **`backend`** — built from `./backend_api_python` on first start if no local image exists yet.
-- For UI development from Vue source, clone **QuantDinger-Vue** into `./QuantDinger-Vue/` and add `-f docker-compose.build.yml` to the command (see *Build the frontend from Vue source* below).
+- For UI development from Vue source, clone **QuantSNS-Vue** into `./QuantSNS-Vue/` and add `-f docker-compose.build.yml` to the command (see *Build the frontend from Vue source* below).
 
 Services: **`postgres`**, **`redis`**, **`backend`**, **`frontend`**, **`mobile`** (see `docker-compose.yml`).
 
@@ -449,16 +449,16 @@ APP_VERSION=$(git describe --tags --abbrev=0 | sed 's/^v//') docker compose up -
 
 #### Alternative: build the frontend or mobile H5 from source
 
-If you have access to the **QuantDinger-Vue** repo and want to iterate on UI source (theme tweaks, forks, debugging) instead of pulling the published image, clone it into the `./QuantDinger-Vue/` slot at the repo root (gitignored) and let Compose build from there:
+If you have access to the **QuantSNS-Vue** repo and want to iterate on UI source (theme tweaks, forks, debugging) instead of pulling the published image, clone it into the `./QuantSNS-Vue/` slot at the repo root (gitignored) and let Compose build from there:
 
 ```bash
-git clone https://github.com/brokermr810/QuantDinger-Vue.git QuantDinger-Vue
+git clone https://github.com/brokermr810/QuantSNS-Vue.git QuantSNS-Vue
 docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 ```
 
-The same override can build the mobile H5 client from `./QuantDinger-Mobile/` or `MOBILE_SRC_PATH=/abs/path/to/QuantDinger-Mobile`.
+The same override can build the mobile H5 client from `./QuantSNS-Mobile/` or `MOBILE_SRC_PATH=/abs/path/to/QuantSNS-Mobile`.
 
-The main `docker-compose.yml` only pulls GHCR images; the override file `docker-compose.build.yml` adds local `build:` blocks. Without the override, `./QuantDinger-Vue/` and `./QuantDinger-Mobile/` do not need to exist. Point `FRONTEND_SRC_PATH` / `MOBILE_SRC_PATH` somewhere else if you keep sources outside this repo, or set `COMPOSE_FILE=docker-compose.yml:docker-compose.build.yml` in a root `.env` to skip the long `-f -f` invocation.
+The main `docker-compose.yml` only pulls GHCR images; the override file `docker-compose.build.yml` adds local `build:` blocks. Without the override, `./QuantSNS-Vue/` and `./QuantSNS-Mobile/` do not need to exist. Point `FRONTEND_SRC_PATH` / `MOBILE_SRC_PATH` somewhere else if you keep sources outside this repo, or set `COMPOSE_FILE=docker-compose.yml:docker-compose.build.yml` in a root `.env` to skip the long `-f -f` invocation.
 
 ### 5) Verify and sign in
 
@@ -491,8 +491,8 @@ In the normal Docker stack, you usually do **not** need to edit a frontend API U
 | Full `docker compose up -d` stack | Nothing for API routing. Open `http://localhost:8888` or `http://localhost:8889`; both use same-origin `/api/`. |
 | Change exposed ports | Root `.env`: `FRONTEND_PORT=8888`, `MOBILE_PORT=8889`, `BACKEND_PORT=127.0.0.1:5000`. |
 | Run frontend/mobile image without the main Compose stack | Set container env `BACKEND_URL=http://host.docker.internal:5000` or your real backend origin. This controls the Nginx `/api/` proxy inside the UI container. |
-| Desktop web source development | In `QuantDinger-Vue`, set `VITE_DEV_PROXY_TARGET=http://127.0.0.1:5000`, then run `pnpm run serve`. DevTools will show `http://localhost:8000/api/...`; Vite forwards it. |
-| Mobile H5 source development | In `QuantDinger-Mobile`, set `VITE_DEV_API_TARGET=http://127.0.0.1:5000`, then run `npm run dev`. DevTools may show `http://localhost:5173/api/...`; Vite forwards it. |
+| Desktop web source development | In `QuantSNS-Vue`, set `VITE_DEV_PROXY_TARGET=http://127.0.0.1:5000`, then run `pnpm run serve`. DevTools will show `http://localhost:8000/api/...`; Vite forwards it. |
+| Mobile H5 source development | In `QuantSNS-Mobile`, set `VITE_DEV_API_TARGET=http://127.0.0.1:5000`, then run `npm run dev`. DevTools may show `http://localhost:5173/api/...`; Vite forwards it. |
 | Static H5 behind your own domain | Prefer same-origin reverse proxy: serve `https://m.example.com` and proxy `https://m.example.com/api/` to the backend. |
 | Native mobile app | Use the app settings page to set a phone-reachable server URL, for example `http://192.168.1.10:5000` or `https://api.example.com`. |
 
@@ -534,11 +534,11 @@ If `py` is not on PATH, use `python` or `python3` in the one-liner that generate
 
 | Symptom | What to check |
 |---------|----------------|
-| `QuantDinger-Vue` / `QuantDinger-Mobile` not found | You added `-f docker-compose.build.yml` without cloning UI source. Drop the override (plain `docker compose up -d`) or clone the needed repo into `./QuantDinger-Vue/` / `./QuantDinger-Mobile/` first. |
+| `QuantSNS-Vue` / `QuantSNS-Mobile` not found | You added `-f docker-compose.build.yml` without cloning UI source. Drop the override (plain `docker compose up -d`) or clone the needed repo into `./QuantSNS-Vue/` / `./QuantSNS-Mobile/` first. |
 | `redis` / `python` / `node` pull fails, `content size of zero` | Docker Hub unreachable from Docker Desktop. Set root `.env` `IMAGE_PREFIX=docker.m.daocloud.io/library/` and/or configure **Docker Desktop → Proxies** (system VPN alone is often not enough). |
 | Backend exits immediately | `SECRET_KEY` still default, or invalid `.env` syntax. Read `docker compose logs backend`. |
 | Blank page or API errors from browser | `FRONTEND_URL` / origins mismatch; API not reachable from the host you opened. |
-| Mobile or web source dev calls the wrong backend | Use `VITE_DEV_PROXY_TARGET` for `QuantDinger-Vue`, `VITE_DEV_API_TARGET` for `QuantDinger-Mobile`, and restart the dev server after changing env vars. |
+| Mobile or web source dev calls the wrong backend | Use `VITE_DEV_PROXY_TARGET` for `QuantSNS-Vue`, `VITE_DEV_API_TARGET` for `QuantSNS-Mobile`, and restart the dev server after changing env vars. |
 | Mobile source dev fails with `crypto.hash is not a function` | Node is too old for Vite 7. Install/switch to Node 22 LTS (or at least Node 20.19+ / 22.12+). |
 | Port already in use | Another Postgres, Redis, or local service on `5432` / `6379` / `5000` / `8888` / `8889`. Adjust variables in root `.env` per `docker-compose.yml`. |
 | Many live strategies, “start denied”| Raise `STRATEGY_MAX_THREADS` in `backend_api_python/.env` and restart API (see comments in `env.example`). |
@@ -752,11 +752,11 @@ It is both. QuantDinger is built to connect AI research, charting, strategy deve
 
 ### Can I use QuantDinger commercially?
 
-QuantDinger is a product of **Open Byte Inc**. The backend is licensed under Apache 2.0. The **web** frontend source ([QuantDinger-Vue](https://github.com/brokermr810/QuantDinger-Vue)) and **mobile app repo** ([QuantDinger-Mobile](https://github.com/brokermr810/QuantDinger-Mobile)) use separate source-available licenses — review each repository and contact Open Byte Inc for commercial frontend/mobile authorization if needed.
+QuantDinger is a product of **Open Byte Inc**. The backend is licensed under Apache 2.0. The **web** frontend source ([QuantSNS-Vue](https://github.com/brokermr810/QuantSNS-Vue)) and **mobile app repo** ([QuantSNS-Mobile](https://github.com/brokermr810/QuantSNS-Mobile)) use separate source-available licenses — review each repository and contact Open Byte Inc for commercial frontend/mobile authorization if needed.
 
 ### Is there a mobile app?
 
-Yes — the Docker stack serves the mobile H5 client at **`http://localhost:8889`**. For native Android/iOS shells, see **[QuantDinger-Mobile](https://github.com/brokermr810/QuantDinger-Mobile)**.
+Yes — the Docker stack serves the mobile H5 client at **`http://localhost:8889`**. For native Android/iOS shells, see **[QuantSNS-Mobile](https://github.com/brokermr810/QuantSNS-Mobile)**.
 
 ## Exchange Partner Links
 
@@ -778,8 +778,8 @@ The following links are available in-app under **Profile → Open account** or *
 - Backend source code is licensed under **Apache License 2.0**. See `LICENSE`.
 - This repository distributes the frontend UI here as **prebuilt files** for integrated deployment.
 - QuantDinger is a product of **Open Byte Inc**. QuantDinger names, logos, product identity, and commercial licensing are managed by Open Byte Inc.
-- The frontend source code is available separately at [QuantDinger Frontend](https://github.com/brokermr810/QuantDinger-Vue) under the **QuantDinger Frontend Source-Available License v1.0**.
-- The mobile H5/native client source code is available separately at [QuantDinger Mobile](https://github.com/brokermr810/QuantDinger-Mobile) under the same source-available license family.
+- The frontend source code is available separately at [QuantDinger Frontend](https://github.com/brokermr810/QuantSNS-Vue) under the **QuantDinger Frontend Source-Available License v1.0**.
+- The mobile H5/native client source code is available separately at [QuantDinger Mobile](https://github.com/brokermr810/QuantSNS-Mobile) under the same source-available license family.
 - Under those frontend/mobile licenses, non-commercial use and eligible qualified non-profit use are permitted free of charge, while commercial use requires a separate commercial license from Open Byte Inc.
 - Trademark, branding, attribution, and watermark usage are governed separately and may not be removed or altered without permission. See `TRADEMARKS.md`.
 

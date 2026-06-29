@@ -1,7 +1,7 @@
 # Repository Scripts
 
 These scripts are backend and repository maintenance helpers. Frontend build and
-i18n tooling belongs in the separate `QuantDinger-Vue` repository.
+i18n tooling belongs in the separate `QuantSNS-Vue` repository.
 
 The end-user installers live at the repository root:
 

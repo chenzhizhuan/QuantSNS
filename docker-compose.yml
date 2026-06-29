@@ -150,11 +150,11 @@ services:
   # Frontend (Nginx serving prebuilt SPA)
   # ========================
   # Default behaviour: pull the prebuilt multi-arch image from GHCR.
-  # Local iteration: clone QuantDinger-Vue into `./QuantDinger-Vue/`
+  # Local iteration: clone QuantSNS-Vue into `./QuantSNS-Vue/`
   # (gitignored) and layer the build override on top:
   #   docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
   # The `build:` block lives in docker-compose.build.yml so users who only
-  # pull never need the `./QuantDinger-Vue/` directory to exist (Compose
+  # pull never need the `./QuantSNS-Vue/` directory to exist (Compose
   # validates build context paths eagerly when `build:` is present).
   frontend:
     # Tag resolution (highest precedence wins):

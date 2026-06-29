@@ -84,7 +84,7 @@ No standalone `v3_*.sql` files remain in the repository.
 ### ⚠️ Upgrade Notes
 
 1. **Backend**: `docker compose up -d --build backend` (or restart) so new routes (`/api/users/login-logs`) and `login_notify` logic are loaded — `restart` alone is not enough if the image was built before this tag.
-2. **Frontend**: rebuild or run `npm run dev` with current `QuantDinger-Vue-src`; hard-refresh Profile to see the Login history tab.
+2. **Frontend**: rebuild or run `npm run dev` with current `QuantSNS-Vue-src`; hard-refresh Profile to see the Login history tab.
 3. **SMTP**: login alert emails require working `SMTP_*` env vars; in-app alerts require browser channel enabled in notification settings.
 4. **Bootstrap admin**: if you need to re-test the initial-password prompt, set `password_changed_at = NULL` only for `id = (SELECT MIN(id) FROM qd_users)`.
 
@@ -95,7 +95,7 @@ No standalone `v3_*.sql` files remain in the repository.
 | Login notify | `backend_api_python/app/services/login_notify.py` |
 | Auth hooks | `backend_api_python/app/routes/auth.py` |
 | Login logs API | `backend_api_python/app/routes/user.py` |
-| Profile UI | `QuantDinger-Vue-src/src/views/profile/index.vue` |
+| Profile UI | `QuantSNS-Vue-src/src/views/profile/index.vue` |
 | Schema | `backend_api_python/migrations/init.sql` |
 | Sandbox | `backend_api_python/app/utils/safe_exec.py` |
 | HTX V5 | `backend_api_python/app/services/live_trading/htx_v5.py`, `htx.py` |
@@ -238,8 +238,8 @@ Production screenshots surfaced two real issues, **fixed in the same version**:
 | `backend_api_python/migrations/init.sql` | `qd_usdt_orders` new columns + partial unique index + self-heal migration |
 | `backend_api_python/env.example` | New env vars (4-chain addresses / explorer keys / suffix precision) |
 | `backend_api_python/app/routes/billing.py` | New `/usdt/chains`; `/usdt/create` accepts `chain` param |
-| `QuantDinger-Vue-src/src/views/billing/index.vue` | Chain selection modal + URI QR + suffix highlight |
-| `QuantDinger-Vue-src/src/api/billing.js` | `listUsdtChains()` / `createUsdtOrder(plan, chain)` |
+| `QuantSNS-Vue-src/src/views/billing/index.vue` | Chain selection modal + URI QR + suffix highlight |
+| `QuantSNS-Vue-src/src/api/billing.js` | `listUsdtChains()` / `createUsdtOrder(plan, chain)` |
 | `backend_api_python/tests/test_usdt_payment_chains.py` | 15 new unit tests |
 
 ---
@@ -329,7 +329,7 @@ ESLint green on all touched `.vue` / `.js` files.
 
 - **Zero breaking changes**: all backend routes, env vars, DB schema backward compatible
 - **Database**: first startup auto-applies `migrations/init.sql`; if PG user is not table owner, startup banner points to `ALTER TABLE ... OWNER TO <user>;`
-- **Frontend**: build `QuantDinger-Vue-src` and replace `frontend/dist` (repo `frontend/dist` includes this build)
+- **Frontend**: build `QuantSNS-Vue-src` and replace `frontend/dist` (repo `frontend/dist` includes this build)
 - **Alpaca**: add `alpaca-py>=0.30.0` to production `requirements.txt`, or `pip install alpaca-py` locally (already in `backend_api_python/requirements.txt`)
 
 ### 🗂️ Files Changed Overview
@@ -566,7 +566,7 @@ docker compose exec -T postgres psql -U quantdinger -d quantdinger -f /tmp/migra
 - `mcp_server/src/quantdinger_mcp/{__init__.py, server.py}` — `FastMCP` + `httpx`, three transports via env
 - `mcp_server/tests/test_transport_resolution.py`
 
-**Frontend (`QuantDinger-Vue-src/` + synced to `frontend/dist/`):**
+**Frontend (`QuantSNS-Vue-src/` + synced to `frontend/dist/`):**
 - `src/api/agent.js` — Agent admin API client
 - `src/views/agent-tokens/index.vue` — Tokens / Audit dual-tab page
 - `src/config/router.config.js` — new route `/agent-tokens`, `permission: ['admin']`
@@ -618,7 +618,7 @@ All 9 locale files vs `zh-CN` baseline: **missing = 0** ✅
 - **`scripts/i18n-fill-ai.js`** — incremental AI translation. DeepSeek / Anthropic / OpenAI / OpenRouter; batch (default 80) + concurrency (default 6) + local cache (`scripts/.i18n-cache/`) + auto backup (`*.js.bak`); safe append write-back. Failed batches: 3 retries + partial retain. Preserves `{foo}`, `<code>…</code>`, `\n`, HTML tags, `BTC/ETH/USDT/AI/MT5`, etc.
 - **`scripts/i18n-patch-specials.js`** — one-shot fill for keys AI script misses: empty strings, nested objects (`trading-assistant.brokerNames`), Chinese measure-word singles (`dashboard.unit.trades` / `.strategies` left empty in ES/TH/VI)
 - **`scripts/README.md`** — toolchain docs: usage, API keys, cost estimates, quality tips
-- **`.gitignore`** — ignore `scripts/.i18n-cache/` and `QuantDinger-Vue-src/src/locales/lang/*.bak`
+- **`.gitignore`** — ignore `scripts/.i18n-cache/` and `QuantSNS-Vue-src/src/locales/lang/*.bak`
 
 ### Translation quality
 
@@ -634,7 +634,7 @@ None.
 
 ### 📦 Files Changed
 
-- `QuantDinger-Vue-src/src/locales/lang/{ar-SA,de-DE,en-US,fr-FR,ja-JP,ko-KR,th-TH,vi-VN,zh-TW}.js`
+- `QuantSNS-Vue-src/src/locales/lang/{ar-SA,de-DE,en-US,fr-FR,ja-JP,ko-KR,th-TH,vi-VN,zh-TW}.js`
 - `scripts/i18n-diff.js`、`scripts/i18n-fill-ai.js`、`scripts/i18n-patch-specials.js`、`scripts/README.md`
 - `.gitignore`
 
@@ -667,10 +667,10 @@ No new columns/tables; code-only fixes. Existing deployments **need no SQL**.
 
 - `backend_api_python/app/services/strategy.py` — `update_strategy` merge, `_compute_runtime_metrics`, list/detail runtime metrics
 - `backend_api_python/app/services/trading_executor.py` — `_script_orders_to_execution_signals` USDT→qty, `_hydrate_script_ctx_from_positions` balance/equity refresh
-- `QuantDinger-Vue-src/src/views/trading-bot/components/BotCreateWizard.vue` — martingale/trend forced market orders
-- `QuantDinger-Vue-src/src/views/trading-bot/components/botScriptTemplates.js` — grid dual budget, DCA time-based interval + external close reset
-- `QuantDinger-Vue-src/src/views/trading-bot/components/configs/GridConfig.vue`, `DCAConfig.vue` — param validation
-- `QuantDinger-Vue-src/src/locales/lang/*.js` — 4 new validation strings × 10 languages
+- `QuantSNS-Vue-src/src/views/trading-bot/components/BotCreateWizard.vue` — martingale/trend forced market orders
+- `QuantSNS-Vue-src/src/views/trading-bot/components/botScriptTemplates.js` — grid dual budget, DCA time-based interval + external close reset
+- `QuantSNS-Vue-src/src/views/trading-bot/components/configs/GridConfig.vue`, `DCAConfig.vue` — param validation
+- `QuantSNS-Vue-src/src/locales/lang/*.js` — 4 new validation strings × 10 languages
 
 ---
 
@@ -696,7 +696,7 @@ No new columns/tables; code-only fixes. Existing deployments **need no SQL**.
   - Backend `_simulate_trading_mtf` adds `bar_time` per trade — floor exec_tf to signal TF for **chart bar** start (UTC, `'%Y-%m-%d %H:%M'`)
   - Frontend `renderBacktestSignals` **prefers `trade.bar_time`**; nearest → **floor-snap** (last bar containing time) — eliminates ±1 bar offset
   - Non-MTF unchanged: `trade.time` equals signal bar time; fallback to `trade.time` still correct
-  - Files: `backend_api_python/app/services/backtest.py`, `QuantDinger-Vue-src/src/views/indicator-ide/index.vue`
+  - Files: `backend_api_python/app/services/backtest.py`, `QuantSNS-Vue-src/src/views/indicator-ide/index.vue`
 
 ### 🗄️ Database Migration
 
@@ -745,7 +745,7 @@ SQL
 
 ### 🎨 Frontend / i18n
 
-- `QuantDinger-Vue-src/package.json`, `src/config/defaultSettings.js`, `src/layouts/BasicLayout.vue` version `3.0.1 → 3.0.2`; `README.md` and `docs/README_CN.md` badges synced
+- `QuantSNS-Vue-src/package.json`, `src/config/defaultSettings.js`, `src/layouts/BasicLayout.vue` version `3.0.1 → 3.0.2`; `README.md` and `docs/README_CN.md` badges synced
 - `zh-CN / zh-TW / en-US`: 12 new `community.sync*` / `community.hasUpdate` / `community.already_latest` i18n keys; other locales English fallback
 - Re-ran `npm run build`, synced `dist/` to `frontend/dist/`, `docker compose build frontend`
 - **Patch**: after Buy/Sell marker fix, again `npm run build` + sync `frontend/dist/` + `docker compose build backend frontend && up -d backend frontend`; no extra DB changes
