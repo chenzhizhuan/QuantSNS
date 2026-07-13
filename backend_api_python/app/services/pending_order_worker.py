@@ -36,7 +36,7 @@ from app.services.live_trading.leg_context import (
 )
 from app.services.live_trading.position_query import resolve_reduce_only_quantity
 from app.utils.pnl import calc_notional_value
-from app.services.live_trading.base import LiveTradingError
+from app.services.live_trading.base import LiveTradingError, is_file_descriptor_exhausted
 from app.services.pending_orders.fill_records import (
     persist_strategy_fill,
     trade_close_reason_from_payload,
@@ -99,6 +99,29 @@ AlpacaClient = None
 logger = get_logger(__name__)
 
 ALPACA_FILL_DELTA_EPSILON = 1e-8
+_POSITION_SYNC_FD_BACKOFF_UNTIL = 0.0
+
+
+def _position_sync_fd_backoff_sec() -> float:
+    try:
+        return max(30.0, float(os.getenv("POSITION_SYNC_FD_BACKOFF_SEC", "90")))
+    except Exception:
+        return 90.0
+
+
+def _is_position_sync_fd_backoff_active() -> bool:
+    return time.time() < float(_POSITION_SYNC_FD_BACKOFF_UNTIL or 0.0)
+
+
+def _activate_position_sync_fd_backoff(reason: str) -> None:
+    global _POSITION_SYNC_FD_BACKOFF_UNTIL
+    seconds = _position_sync_fd_backoff_sec()
+    _POSITION_SYNC_FD_BACKOFF_UNTIL = time.time() + seconds
+    logger.error(
+        "[PositionSync] process file descriptors exhausted; pausing exchange position sync for %ss. error=%s",
+        int(seconds),
+        reason,
+    )
 
 class PendingOrderWorker:
     def __init__(self, poll_interval_sec: float = 1.0, batch_size: int = 50):
@@ -127,6 +150,12 @@ class PendingOrderWorker:
                 ensure_position_ledger_schema()
             except Exception as e:
                 logger.warning("ensure_position_ledger_schema failed: %s", e)
+            try:
+                from app.services.strategy_runtime.schema import ensure_strategy_runtime_schema
+
+                ensure_strategy_runtime_schema()
+            except Exception as e:
+                logger.warning("ensure_strategy_runtime_schema failed: %s", e)
             if self._thread and self._thread.is_alive():
                 return True
             self._stop_event.clear()
@@ -199,6 +228,10 @@ class PendingOrderWorker:
 
         This prevents "ghost positions" when positions are closed externally on the exchange.
         """
+        if _is_position_sync_fd_backoff_active():
+            logger.debug("[PositionSync] skipped: file-descriptor backoff active")
+            return
+
         # 1) Load local positions (filtered if target_strategy_id is provided).
         logger.debug(f"[PositionSync] Entering _sync_positions_best_effort for target={target_strategy_id}")
         with get_db_connection() as db:
@@ -360,6 +393,10 @@ class PendingOrderWorker:
                             all_pos = client.get_positions() or []
                         except Exception as e:
                             msg = str(e)
+                            if is_file_descriptor_exhausted(e):
+                                set_exchange_sync_backoff(cache_key, seconds=_position_sync_fd_backoff_sec())
+                                _activate_position_sync_fd_backoff(msg)
+                                return
                             if is_fatal_exchange_error(msg):
                                 logger.error(f"[PositionSync] Strategy {sid} fatal auth error; auto-stopping. error={msg}")
                                 auto_stop_live_strategy(int(sid), msg, source="position_sync_binance")
@@ -405,6 +442,10 @@ class PendingOrderWorker:
                             # Typical OKX response: HTTP 401 {"msg":"Invalid OK-ACCESS-KEY","code":"50111"}
                             msg = str(e)
                             m = msg.lower()
+                            if is_file_descriptor_exhausted(e):
+                                set_exchange_sync_backoff(cache_key, seconds=_position_sync_fd_backoff_sec())
+                                _activate_position_sync_fd_backoff(msg)
+                                return
                             if is_fatal_exchange_error(msg):
                                 logger.error(f"[PositionSync] Strategy {sid} fatal auth error; auto-stopping. error={msg}")
                                 auto_stop_live_strategy(int(sid), msg, source="position_sync_okx")
@@ -591,6 +632,10 @@ class PendingOrderWorker:
                             positions = client.get_positions() or []
                         except Exception as e:
                             msg = str(e)
+                            if is_file_descriptor_exhausted(e):
+                                set_exchange_sync_backoff(cache_key, seconds=_position_sync_fd_backoff_sec())
+                                _activate_position_sync_fd_backoff(msg)
+                                return
                             if is_fatal_exchange_error(msg):
                                 logger.error(
                                     "[PositionSync] Strategy %s IBKR fatal error; auto-stopping. error=%s",
@@ -631,6 +676,10 @@ class PendingOrderWorker:
                         try:
                             positions = client.get_positions() or []
                         except Exception as e:
+                            if is_file_descriptor_exhausted(e):
+                                set_exchange_sync_backoff(cache_key, seconds=_position_sync_fd_backoff_sec())
+                                _activate_position_sync_fd_backoff(str(e))
+                                return
                             logger.error(f"[PositionSync] Strategy {sid} Alpaca get_positions failed: {e}", exc_info=True)
                             continue
                         if isinstance(positions, list):
@@ -662,6 +711,10 @@ class PendingOrderWorker:
                         try:
                             spot_rows = list_spot_wallet_positions(client) or []
                         except Exception as e:
+                            if is_file_descriptor_exhausted(e):
+                                set_exchange_sync_backoff(cache_key, seconds=_position_sync_fd_backoff_sec())
+                                _activate_position_sync_fd_backoff(str(e))
+                                return
                             logger.error(
                                 f"[PositionSync] Strategy {sid} spot wallet sync failed: {e}",
                                 exc_info=True,
@@ -720,9 +773,9 @@ class PendingOrderWorker:
                             pos_summary_parts.append(f"{_sym} {_side_key} size={_qty} entry={_ep}")
 
                 if pos_summary_parts:
-                    logger.info(f"[PositionSync] Strategy {sid} ({safe_cfg.get('exchange_id', 'unknown')}) positions: {'; '.join(pos_summary_parts)}")
+                    logger.debug(f"[PositionSync] Strategy {sid} ({safe_cfg.get('exchange_id', 'unknown')}) positions: {'; '.join(pos_summary_parts)}")
                 else:
-                    logger.info(f"[PositionSync] Strategy {sid} ({safe_cfg.get('exchange_id', 'unknown')}) has NO positions on exchange.")
+                    logger.debug(f"[PositionSync] Strategy {sid} ({safe_cfg.get('exchange_id', 'unknown')}) has NO positions on exchange.")
 
                 # Keep exchange truth in L1 only. Strategy positions (L3) must be
                 # produced by that strategy's own fills, otherwise two live
@@ -730,6 +783,9 @@ class PendingOrderWorker:
                 # exchange account position.
             except Exception as e:
                 msg = str(e)
+                if is_file_descriptor_exhausted(e):
+                    _activate_position_sync_fd_backoff(msg)
+                    return
                 if is_fatal_exchange_error(msg):
                     logger.error(f"[PositionSync] Strategy {sid} fatal error; auto-stopping. error={msg}", exc_info=True)
                     auto_stop_live_strategy(int(sid), msg, source="position_sync")
@@ -901,6 +957,12 @@ class PendingOrderWorker:
                 order_id=order_id,
                 fill_source="worker_alpaca_fill_sync",
                 close_reason=trade_close_reason_from_payload(payload, str(signal_type or "")),
+                strategy_run_id=int(payload.get("strategy_run_id") or row.get("strategy_run_id") or 0),
+                order_intent_id=int(payload.get("order_intent_id") or row.get("order_intent_id") or 0),
+                basket_id=str(payload.get("basket_id") or ""),
+                exchange_id="alpaca",
+                exchange_order_id=str(exchange_order_id or ""),
+                raw_fill=result.raw or {},
             )
             _pstr = f", profit={profit:.4f}" if profit is not None else ""
             append_strategy_log(
@@ -963,6 +1025,22 @@ class PendingOrderWorker:
                     float(avg_price or 0.0),
                     str(exchange_response_json or ""),
                     bool(final and float(filled or 0.0) > 0),
+                    int(order_id),
+                ),
+            )
+            cur.execute(
+                """
+                UPDATE strategy_order_intents soi
+                SET status = CASE WHEN %s > 0 THEN 'filled' ELSE 'submitted' END,
+                    exchange_order_id = COALESCE(NULLIF(%s, ''), exchange_order_id),
+                    updated_at = NOW()
+                FROM pending_orders po
+                WHERE po.id = %s
+                  AND po.order_intent_id = soi.id
+                """,
+                (
+                    float(filled or 0.0),
+                    str(exchange_order_id or ""),
                     int(order_id),
                 ),
             )
@@ -1927,6 +2005,12 @@ class PendingOrderWorker:
                         commission=float(fills.total_fee or 0.0),
                         commission_ccy=str(fills.fee_ccy or "").strip().upper(),
                         close_reason=_close_reason,
+                        strategy_run_id=int(payload.get("strategy_run_id") or order_row.get("strategy_run_id") or 0),
+                        order_intent_id=int(payload.get("order_intent_id") or order_row.get("order_intent_id") or 0),
+                        basket_id=str(payload.get("basket_id") or ""),
+                        exchange_id=str(res.exchange_id or ""),
+                        exchange_order_id=str(res.exchange_order_id or ""),
+                        raw_fill=post_query or {},
                     )
                 logger.info(f"live record done: pending_id={order_id} strategy_id={strategy_id} symbol={symbol} signal={signal_type}")
                 _profit_str = f", profit={profit:.4f}" if profit is not None else ""
@@ -2077,6 +2161,12 @@ class PendingOrderWorker:
                         order_id=int(order_id),
                         fill_source="worker_ibkr",
                         close_reason=trade_close_reason_from_payload(payload, str(signal_type)),
+                        strategy_run_id=int(payload.get("strategy_run_id") or order_row.get("strategy_run_id") or 0),
+                        order_intent_id=int(payload.get("order_intent_id") or order_row.get("order_intent_id") or 0),
+                        basket_id=str(payload.get("basket_id") or ""),
+                        exchange_id="ibkr",
+                        exchange_order_id=str(exchange_order_id or ""),
+                        raw_fill=result.raw or {},
                     )
                     logger.info(f"IBKR record done: pending_id={order_id} strategy_id={strategy_id} symbol={symbol}")
                     _pstr = f", profit={profit:.4f}" if profit is not None else ""
@@ -2214,6 +2304,12 @@ class PendingOrderWorker:
                         order_id=int(order_id),
                         fill_source="worker_alpaca",
                         close_reason=trade_close_reason_from_payload(payload, str(signal_type)),
+                        strategy_run_id=int(payload.get("strategy_run_id") or order_row.get("strategy_run_id") or 0),
+                        order_intent_id=int(payload.get("order_intent_id") or order_row.get("order_intent_id") or 0),
+                        basket_id=str(payload.get("basket_id") or ""),
+                        exchange_id="alpaca",
+                        exchange_order_id=str(exchange_order_id or ""),
+                        raw_fill=result.raw or {},
                     )
                     logger.info(f"Alpaca record done: pending_id={order_id} strategy_id={strategy_id} symbol={symbol}")
                     _pstr = f", profit={profit:.4f}" if profit is not None else ""
@@ -2301,6 +2397,17 @@ class PendingOrderWorker:
                 WHERE id = %s
                 """,
                 (str(error or "failed"), int(order_id)),
+            )
+            cur.execute(
+                """
+                UPDATE strategy_order_intents soi
+                SET status = 'rejected',
+                    updated_at = NOW()
+                FROM pending_orders po
+                WHERE po.id = %s
+                  AND po.order_intent_id = soi.id
+                """,
+                (int(order_id),),
             )
             db.commit()
             cur.close()

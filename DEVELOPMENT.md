@@ -6,7 +6,7 @@
 |------|---------|-------|
 | Docker & Docker Compose | 20+ | required for the default setup |
 | Python | 3.10+ | only if running backend outside Docker |
-| Node.js | 18+ | only if you maintain the private QuantSNS-Vue repo |
+| Node.js | 22 LTS | only if you maintain the private QuantDinger-Vue or mobile source repos |
 
 ## Quick Start (Docker)
 
@@ -33,7 +33,7 @@ The stack includes:
 |---------|------|-------------|
 | `frontend` | 8888 | Nginx serving Vue SPA |
 | `backend` | 5000 | Flask API (gunicorn) |
-| `postgres` | 5432 | PostgreSQL 16 |
+| `postgres` | 5432 | PostgreSQL 18 |
 | `redis` | 6379 | Cache layer (LRU, 128 MB) |
 
 ## Project Structure
@@ -55,7 +55,7 @@ quantdinger/
 │   └── requirements.txt
 ├── docs/                        # Changelog, architecture notes
 ├── docker-compose.yml           # frontend service pulls ghcr.io/.../quantdinger-frontend
-├── docker-compose.ghcr.yml      # both services pulled from GHCR (zero-clone deploy)
+├── docker-compose.ghcr.yml      # backend, frontend, and mobile pulled from GHCR (zero-clone deploy)
 └── README.md
 ```
 
@@ -73,10 +73,10 @@ The dev server starts on `http://localhost:5000` with auto-reload.
 
 ## Frontend (private Vue repository)
 
-The open-source tree **does not** contain Vue source or build artefacts. UI work happens in the private **QuantSNS-Vue** repo. Releases are fully automated:
+The open-source tree **does not** contain Vue source or build artefacts. UI work happens in the private **QuantDinger-Vue** repo. Releases are fully automated:
 
 ```bash
-# In QuantSNS-Vue
+# In QuantDinger-Vue
 git tag v3.0.9
 git push origin v3.0.9
 ```
@@ -103,19 +103,19 @@ The container reads `BACKEND_URL` at start time and substitutes it into the ngin
 
 ### Building frontend from local source
 
-For iterating on Vue source (theme tweaks, debugging, customised UI), drop the source into the gitignored `./QuantSNS-Vue/` slot at the repo root and layer the `docker-compose.build.yml` override on top. The main `docker-compose.yml` only declares `image:` for frontend (so users who only pull never need the directory to exist); the override file adds the `build:` block:
+For iterating on Vue source (theme tweaks, debugging, customised UI), drop the source into the gitignored `./QuantDinger-Vue/` slot at the repo root and layer the `docker-compose.build.yml` override on top. The main `docker-compose.yml` only declares `image:` for frontend (so users who only pull never need the directory to exist); the override file adds the `build:` block:
 
 ```bash
-# Expected layout — clone QuantSNS-Vue into ./QuantSNS-Vue/ at this repo root:
+# Expected layout — clone QuantDinger-Vue into ./QuantDinger-Vue/ at this repo root:
 #   QuantDinger/
-#     QuantSNS-Vue/                <- gitignored; clone goes here
+#     QuantDinger-Vue/                <- gitignored; clone goes here
 #     backend_api_python/
 #     docker-compose.yml
 #     docker-compose.build.yml        <- enables local frontend build
 
-git clone https://github.com/brokermr810/QuantSNS-Vue.git QuantSNS-Vue
+git clone https://github.com/brokermr810/QuantDinger-Vue.git QuantDinger-Vue
 
-# Build frontend from ./QuantSNS-Vue, pull everything else:
+# Build frontend from ./QuantDinger-Vue, pull everything else:
 docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 
 # Rebuild after editing Vue source:
@@ -129,13 +129,13 @@ Tip: drop `COMPOSE_FILE=docker-compose.yml:docker-compose.build.yml` into your r
 
 Key behaviour:
 
-- **Without the override**: Compose pulls `ghcr.io/.../quantdinger-frontend:<tag>` as usual; `./QuantSNS-Vue/` does not need to exist.
-- **With the override**: Compose builds from `./QuantSNS-Vue/` (or `FRONTEND_SRC_PATH` if set) and tags the result with whatever `FRONTEND_TAG` / `IMAGE_TAG` resolves to. The locally built image then satisfies plain `docker compose up` for subsequent runs until you `docker compose pull frontend` to overwrite it.
+- **Without the override**: Compose pulls `ghcr.io/.../quantdinger-frontend:<tag>` as usual; `./QuantDinger-Vue/` does not need to exist.
+- **With the override**: Compose builds from `./QuantDinger-Vue/` (or `FRONTEND_SRC_PATH` if set) and tags the result with whatever `FRONTEND_TAG` / `IMAGE_TAG` resolves to. The locally built image then satisfies plain `docker compose up` for subsequent runs until you `docker compose pull frontend` to overwrite it.
 
-Source path override (keep the Vue clone somewhere else than `./QuantSNS-Vue/`):
+Source path override (keep the Vue clone somewhere else than `./QuantDinger-Vue/`):
 
 ```bash
-FRONTEND_SRC_PATH=/abs/path/to/QuantSNS-Vue \
+FRONTEND_SRC_PATH=/abs/path/to/QuantDinger-Vue \
   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 ```
 
@@ -178,6 +178,8 @@ pytest tests/ -v
 ```
 
 ## Troubleshooting
+
+- **First-time Docker install or pull failures** - see the bilingual [Installation Troubleshooting](docs/INSTALL_TROUBLESHOOTING.md) guide for Docker Desktop proxy setup, Docker Hub pull errors, and Postgres data-version issues.
 
 - **"apikey parameter is incorrect"** from Twelve Data — verify `TWELVE_DATA_API_KEY` in `.env`; Chinese stock data requires a paid plan.
 - **Heatmap "暂无数据"** — usually caused by NaN in yfinance data; the global JSON encoder now sanitises all NaN/Inf to `null`.
