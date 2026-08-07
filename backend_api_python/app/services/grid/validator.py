@@ -26,9 +26,12 @@ def validate_grid_config(
     warnings: List[str] = []
     if cfg.upper_price <= cfg.lower_price:
         return False, "upperPrice must be greater than lowerPrice", warnings
-    if cfg.amount_per_grid <= 0:
+    effective_amount_per_grid = float(cfg.amount_per_grid or 0.0)
+    if cfg.amount_per_grid_pct > 0 and initial_capital > 0:
+        effective_amount_per_grid = initial_capital * cfg.amount_per_grid_pct
+    if effective_amount_per_grid <= 0:
         return False, "amountPerGrid must be > 0", warnings
-    levels = generate_levels(cfg.lower_price, cfg.upper_price, cfg.grid_count, cfg.grid_mode)
+    levels = generate_levels(cfg.lower_price, cfg.upper_price, cfg.grid_line_count, cfg.grid_mode)
     cells = generate_cells(levels)
     if len(cells) < 1:
         return False, "gridCount too small to form grid cells", warnings
@@ -65,12 +68,30 @@ def validate_grid_config(
             "Widen the price range, reduce gridCount, or lower fee settings.",
             warnings,
         )
+    min_spread = float(cfg.min_spread_between_orders or 0.0)
+    if min_spread > 0:
+        for cell in cells:
+            lo = float(cell.lower_price or 0.0)
+            hi = float(cell.upper_price or 0.0)
+            if lo <= 0 or hi <= lo:
+                continue
+            cell_spread = (hi - lo) / lo
+            if cell_spread < min_spread:
+                return (
+                    False,
+                    "Grid spacing is below minSpreadBetweenOrders: "
+                    f"cell [{lo:.4f}, {hi:.4f}] is {cell_spread * 100:.3f}% "
+                    f"but requires at least {min_spread * 100:.3f}%.",
+                    warnings,
+                )
 
     if initial_capital > 0 and cfg.initial_position_pct > 0:
         init_usdt = initial_capital * cfg.initial_position_pct
-        if init_usdt < cfg.amount_per_grid * 0.5:
+        if init_usdt < effective_amount_per_grid * 0.5:
             warnings.append(
-                f"Initial position (~{init_usdt:.2f} USDT) is small vs amountPerGrid ({cfg.amount_per_grid})"
+                "Initial position "
+                f"(~{init_usdt:.2f} USDT) is small vs amountPerGrid "
+                f"({effective_amount_per_grid:.2f})"
             )
 
     return True, "", warnings

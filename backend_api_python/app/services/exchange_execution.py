@@ -3,9 +3,8 @@ Exchange execution helpers (local deployment).
 
 This module provides helpers for resolving exchange configs and safe logging.
 
-Notes:
-- In paper mode, the system only enqueues signals into `pending_orders`.
-- Real trading execution is intentionally not implemented here.
+This module resolves encrypted credential references and normalizes broker
+configuration before the pending-order worker selects a live adapter.
 """
 
 from __future__ import annotations
@@ -81,7 +80,12 @@ def mask_secret(s: str, keep: int = 4) -> str:
 def safe_exchange_config_for_log(cfg: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(cfg, dict):
         return {}
-    out = dict(cfg)
+    from app.services.live_trading.partner_attribution import (
+        redact_partner_attribution,
+        strip_partner_config,
+    )
+
+    out = redact_partner_attribution(strip_partner_config(cfg))
     for k in ["api_key", "secret_key", "passphrase", "apiKey", "secret", "password"]:
         if k in out and out.get(k):
             out[k] = mask_secret(str(out.get(k)))
@@ -190,8 +194,22 @@ def resolve_exchange_config(exchange_config: Dict[str, Any], user_id: int = 1) -
     except Exception as e:
         logger.warning(f"Failed to load credential_id={credential_id}: {e}")
 
-    # Overlay strategy-level settings (non-empty wins)
-    for k, v in exchange_config.items():
+    from app.services.live_trading.partner_attribution import strip_partner_config
+
+    credential_owned_keys = {
+        "exchange_id", "exchangeId", "exchange",
+        "api_key", "apiKey", "secret_key", "secret", "passphrase", "password",
+        "environment", "network", "env",
+        "market_scope", "marketScope",
+        "enable_demo_trading", "enableDemoTrading", "simulated_trading", "simulatedTrading",
+        "use_testnet", "is_testnet", "isTestnet", "sandbox", "paper_trading", "paperTrading",
+        "base_url", "baseUrl", "futures_base_url", "futuresBaseUrl",
+    }
+
+    # Overlay strategy-level settings, excluding credential-owned and revenue fields.
+    for k, v in strip_partner_config(exchange_config).items():
+        if credential_id and k in credential_owned_keys:
+            continue
         if v is None:
             continue
         if isinstance(v, str) and not v.strip():

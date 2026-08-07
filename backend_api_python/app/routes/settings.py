@@ -20,6 +20,15 @@ logger = get_logger(__name__)
 
 settings_blp = Blueprint('settings', __name__)
 
+# These values are process-group security roots. They may be persisted through
+# the settings UI, but applying them to only one Gunicorn worker would make
+# authentication or credential decryption inconsistent until every worker has
+# restarted.
+RESTART_REQUIRED_SETTINGS = {
+    'SECRET_KEY',
+    'CREDENTIAL_ENCRYPTION_KEY',
+}
+
 # ---------------------------------------------------------------
 # ---------------------------------------------------------------
 
@@ -161,7 +170,7 @@ CONFIG_SCHEMA = {
                 'key': 'BRAND_CONTACT_FEATURE_REQUEST_URL',
                 'label': 'Feature Request URL',
                 'type': 'text',
-                'default': 'https://github.com/brokermr810/QuantDinger/issues',
+                'default': 'https://github.com/OpenByteInc/QuantDinger/issues',
                 'description': 'Where to send users who want to file an issue or feature request.'
             },
         ]
@@ -269,8 +278,8 @@ CONFIG_SCHEMA = {
                 'key': 'SECRET_KEY',
                 'label': 'Secret Key',
                 'type': 'password',
-                'default': 'quantdinger-secret-key-change-me',
-                'description': 'JWT signing secret key. MUST change in production for security'
+                'default': '',
+                'description': 'Required JWT signing key (minimum 10 bytes for legacy compatibility; 32+ random bytes recommended)'
             },
             {
                 'key': 'ADMIN_USER',
@@ -626,8 +635,8 @@ CONFIG_SCHEMA = {
                 'key': 'SPOT_CLOSE_SAFETY_RATIO',
                 'label': 'Spot Close Safety Ratio',
                 'type': 'number',
-                'default': '0.998',
-                'description': 'When closing spot long, sell qty is capped to (exchange free base × this ratio), then floored to lot step. Lower if full close fails due to fees (valid range 0.9–1.0).'
+                'default': '1.0',
+                'description': 'When closing spot long, sell qty is capped to (exchange free base × this ratio), then floored to lot step. Base-asset fees are already deducted from strategy inventory; lower only if a venue still rejects full closes (valid range 0.9–1.0).'
             },
             {
                 'key': 'SPOT_OPEN_QUOTE_BUFFER',
@@ -688,7 +697,7 @@ CONFIG_SCHEMA = {
                 'default': 'binance',
                 'link': 'https://github.com/ccxt/ccxt#supported-cryptocurrency-exchange-markets',
                 'link_text': 'settings.link.supportedExchanges',
-                'description': 'Default exchange for crypto market data (binance recommended for BTC/USDT; coinbase uses USD pairs)'
+                'description': 'Default crypto market-data exchange: binance, bitget, bybit, okx, gate, or htx'
             },
             {
                 'key': 'FINNHUB_API_KEY',
@@ -1606,11 +1615,25 @@ CONFIG_SCHEMA = {
                 'description': 'How often the background worker re-scans pending/paid orders against on-chain data.'
             },
             {
+                'key': 'BILLING_COST_BACKTEST',
+                'label': 'Backtest Cost',
+                'type': 'number',
+                'default': '30',
+                'description': 'Credits charged for each strategy backtest run'
+            },
+            {
+                'key': 'BILLING_COST_AI_REVIEW',
+                'label': 'AI Strategy Review Cost',
+                'type': 'number',
+                'default': '10',
+                'description': 'Credits charged for each successful AI-assisted strategy review'
+            },
+            {
                 'key': 'BILLING_COST_AI_ANALYSIS',
                 'label': 'AI Analysis Cost (per symbol)',
                 'type': 'number',
                 'default': '10',
-                'description': 'Credits per symbol (instant analysis, AI filter, scheduled tasks all use this price)'
+                'description': 'Credits per symbol (instant analysis and scheduled tasks use this price)'
             },
             {
                 'key': 'BILLING_COST_AI_CODE_GEN',
@@ -1618,6 +1641,13 @@ CONFIG_SCHEMA = {
                 'type': 'number',
                 'default': '30',
                 'description': 'Credits per AI strategy/indicator code generation (higher token usage)'
+            },
+            {
+                'key': 'BILLING_COST_AI_INDICATOR_TO_STRATEGY',
+                'label': 'AI Indicator-to-Strategy Cost',
+                'type': 'number',
+                'default': '30',
+                'description': 'Credits per AI conversion from a chart-only indicator into an executable script strategy'
             },
             {
                 'key': 'BILLING_COST_AI_TUNING',
@@ -1646,6 +1676,13 @@ CONFIG_SCHEMA = {
                 'type': 'number',
                 'default': '20',
                 'description': 'Credits per AI opportunity radar / market scan request'
+            },
+            {
+                'key': 'MARKETPLACE_PLATFORM_FEE_RATE',
+                'label': 'Marketplace Platform Fee Rate',
+                'type': 'text',
+                'default': '0',
+                'description': 'Platform commission deducted from paid market purchases before crediting the seller. Accepts ratio values like 0.1 or percent strings like 10%.'
             },
             {
                 'key': 'CREDITS_REGISTER_BONUS',
@@ -1729,7 +1766,7 @@ def get_brand_config():
 @login_required
 @admin_required
 def get_settings_values():
-    """Return current settings values including secrets (admin only)."""
+    """Return current settings values without exposing stored secrets."""
     env_values = read_env_file()
     
     result = {}
@@ -1737,16 +1774,55 @@ def get_settings_values():
         result[group_key] = {}
         for item in group['items']:
             key = item['key']
-            value = env_values.get(key, item.get('default', ''))
-            result[group_key][key] = value
             if item['type'] == 'password':
+                value = env_values.get(key, '')
+                result[group_key][key] = ''
                 result[group_key][f'{key}_configured'] = bool(value)
+            else:
+                result[group_key][key] = env_values.get(key, item.get('default', ''))
     
     return jsonify({
         'code': 1,
         'msg': 'success',
         'data': result
     })
+
+
+@settings_blp.route('/market-catalog', methods=['GET'])
+@login_required
+@admin_required
+def get_market_catalog():
+    """Return market catalog coverage and the latest synchronization state."""
+    try:
+        from app.services.market_catalog_sync import get_market_catalog_overview
+        return jsonify({
+            'code': 1,
+            'msg': 'success',
+            'data': get_market_catalog_overview(),
+        })
+    except Exception as exc:
+        logger.error("Failed to load market catalog overview: %s", exc, exc_info=True)
+        return jsonify({'code': 0, 'msg': str(exc)}), 500
+
+
+@settings_blp.route('/market-catalog/sync', methods=['POST'])
+@login_required
+@admin_required
+def sync_market_catalog():
+    """Start a non-blocking full sync for the supported crypto venues."""
+    try:
+        from app.services.market_catalog_sync import start_market_catalog_sync
+        result = start_market_catalog_sync('manual')
+        if not result.get('started'):
+            return jsonify({
+                'code': 0,
+                'msg': result.get('reason', 'already_running'),
+                'data': result,
+            }), 409
+        return jsonify({'code': 1, 'msg': 'started', 'data': result}), 202
+    except Exception as exc:
+        logger.error("Failed to start market catalog sync: %s", exc, exc_info=True)
+        return jsonify({'code': 0, 'msg': str(exc)}), 500
 
 
 @settings_blp.route('/save', methods=['POST'])
@@ -1814,9 +1890,15 @@ def save_settings():
         current_env.update(updates)
         
         if write_env_file(current_env):
-            clear_config_cache()
-            reload_runtime_env()
-            refresh_runtime_services()
+            restart_keys = sorted(RESTART_REQUIRED_SETTINGS.intersection(updates))
+            hot_reload_keys = sorted(set(updates) - RESTART_REQUIRED_SETTINGS)
+
+            # Runtime reload preserves process-group security roots. Skip the
+            # reload entirely when every changed value requires a restart.
+            if hot_reload_keys:
+                clear_config_cache()
+                reload_runtime_env()
+                refresh_runtime_services()
 
             if 'ADMIN_EMAIL' in updates:
                 try:
@@ -1835,9 +1917,11 @@ def save_settings():
 
             response_data = {
                 'updated_keys': list(updates.keys()),
-                'requires_restart': False,
-                'hot_reloaded': True,
-                'services_refreshed': True
+                'restart_required_keys': restart_keys,
+                'hot_reloaded_keys': hot_reload_keys,
+                'requires_restart': bool(restart_keys),
+                'hot_reloaded': bool(hot_reload_keys),
+                'services_refreshed': bool(hot_reload_keys)
             }
             if admin_email_sync is not None:
                 response_data['admin_email_sync'] = admin_email_sync

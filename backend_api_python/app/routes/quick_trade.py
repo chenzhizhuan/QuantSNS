@@ -18,25 +18,38 @@ import json
 import time
 import traceback
 import uuid
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from flask import g, jsonify, request
 from app.openapi.blueprint import HumanBlueprint as Blueprint
+from app.openapi.schemas.high_risk import (
+    QuickTradeCloseRequestSchema,
+    QuickTradeOrderRequestSchema,
+)
 
 from app.utils.db import get_db_connection
 from app.utils.logger import get_logger
 from app.utils.auth import login_required
-from app.services.quick_trade.balances import empty_balance_dict, fetch_balance_raw
+from app.services.quick_trade.balances import empty_balance_dict, fetch_balance_raw, parse_balance as _parse_balance
 from app.services.quick_trade.credentials import build_exchange_config, create_exchange_client
 from app.services.quick_trade.errors import (
     exchange_error_user_message,
     merge_balance_leg_errors,
     parse_trade_error_hint,
 )
-from app.services.quick_trade.orders import enrich_fill, limit_order_kwargs
+from app.services.quick_trade.orders import (
+    attach_quick_trade_protection,
+    enrich_fill,
+    limit_order_kwargs,
+    quick_order_status,
+)
 from app.services.quick_trade.symbols import (
     is_supported_crypto_exchange,
     symbols_match as quick_trade_symbols_match,
+)
+from app.services.live_trading.position_row_parse import (
+    extract_signed_position_qty,
+    infer_position_side_from_row,
 )
 from app.utils.request_guard import RequestGuardError, cache_key, guarded_cached
 
@@ -207,6 +220,14 @@ def _convert_usdt_to_base_qty(client, symbol: str, usdt_amount: float, market_ty
         return usdt_amount
 
 
+def _resolve_order_notional_usdt(amount_usdt: float, leverage: int, market_type: str) -> float:
+    """Translate the page input into quote notional using one consistent contract."""
+    amount = max(0.0, float(amount_usdt or 0.0))
+    if str(market_type or "").strip().lower() == "swap":
+        return amount * max(1, int(leverage or 1))
+    return amount
+
+
 def _reject_quick_trade_if_desktop_broker(exchange_id: str):
     """Quick Trade is USDT-centric and only wired to crypto exchange clients."""
     if not is_supported_crypto_exchange(exchange_id):
@@ -241,8 +262,13 @@ def _record_quick_trade(
     raw_result: Dict[str, Any],
     commission: float = 0.0,
     commission_ccy: str = "",
+    commission_quote: Optional[float] = None,
+    client_order_id: str = "",
 ):
     """Insert a quick trade record into the database."""
+    from app.services.live_trading.partner_attribution import redact_partner_attribution
+
+    raw_result = redact_partner_attribution(raw_result or {})
     try:
         with get_db_connection() as db:
             cur = db.cursor()
@@ -252,9 +278,9 @@ def _record_quick_trade(
                     (user_id, credential_id, exchange_id, symbol, side, order_type,
                      amount, price, leverage, market_type, tp_price, sl_price,
                      status, exchange_order_id, filled_amount, avg_fill_price,
-                     commission, commission_ccy,
+                     commission, commission_ccy, commission_quote,
                      error_msg, source, raw_result, created_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                 RETURNING id
                 """,
                 (
@@ -262,13 +288,31 @@ def _record_quick_trade(
                     amount, price, leverage, market_type, tp_price, sl_price,
                     status, exchange_order_id, filled, avg_price,
                     float(commission or 0.0), str(commission_ccy or "").strip().upper(),
+                    float(commission_quote) if commission_quote is not None else None,
                     error_msg, source, json.dumps(raw_result or {}),
                 ),
             )
             row = cur.fetchone()
             db.commit()
             cur.close()
-            return (row or {}).get("id")
+            trade_id = int((row or {}).get("id") or 0)
+            if trade_id > 0 and exchange_order_id:
+                from app.services.execution_streams.repository import ExecutionEventRepository
+
+                ExecutionEventRepository().register_binding(
+                    credential_id=int(credential_id or 0),
+                    exchange_id=str(exchange_id or ""),
+                    market_type=str(market_type or "swap"),
+                    owner_type="quick_trade",
+                    owner_id=trade_id,
+                    user_id=int(user_id or 1),
+                    symbol=str(symbol or ""),
+                    signal_type=str(side or ""),
+                    client_order_id=str(client_order_id or ""),
+                    exchange_order_id=str(exchange_order_id or ""),
+                    observed_filled=float(filled or 0.0),
+                )
+            return trade_id
     except Exception as e:
         logger.error(f"Failed to record quick trade: {e}")
         return None
@@ -278,7 +322,8 @@ def _record_quick_trade(
 
 @quick_trade_blp.route('/place-order', methods=['POST'])
 @login_required
-def place_order():
+@quick_trade_blp.arguments(QuickTradeOrderRequestSchema, location="json")
+def place_order(body):
     """
     Place a quick market or limit order.
 
@@ -287,7 +332,7 @@ def place_order():
       symbol         (str)    - e.g. "BTC/USDT"
       side           (str)    - "buy" or "sell"
       order_type     (str)    - "market" or "limit"  (default: market)
-      amount         (float)  - USDT amount (always in USDT, will be converted to base qty)
+      amount         (float)  - spot quote amount or swap margin amount in USDT
       price          (float)  - limit price (required for limit orders)
       leverage       (int)    - leverage multiplier (default: 1)
                                 - leverage = 1: spot market
@@ -299,13 +344,11 @@ def place_order():
     """
     try:
         user_id = g.user_id
-        body = request.get_json(force=True, silent=True) or {}
-
         credential_id = int(body.get("credential_id") or 0)
         symbol = str(body.get("symbol") or "").strip()
         side = str(body.get("side") or "").strip().lower()
         order_type = str(body.get("order_type") or "market").strip().lower()
-        usdt_amount = float(body.get("amount") or 0)  # Always USDT amount
+        usdt_amount = float(body.get("amount") or 0)
         price = float(body.get("price") or 0)
         leverage = int(body.get("leverage") or 1)
         market_type = str(body.get("market_type") or "").strip().lower()
@@ -332,13 +375,14 @@ def place_order():
         if order_type == "limit" and price <= 0:
             return jsonify({"code": 0, "msg": "price required for limit orders"}), 400
 
-        # ---- market_type: leverage 1 => spot API, else perpetual (swap) ----
+        # Preserve an explicit 1x perpetual selection. Infer only when omitted.
         if market_type in ("futures", "future", "perp", "perpetual"):
             market_type = "swap"
-        if leverage > 1:
-            market_type = "swap"
-        else:
-            market_type = "spot"
+        if market_type not in ("spot", "swap"):
+            market_type = "swap" if leverage > 1 else "spot"
+        if market_type == "swap" and not margin_mode:
+            margin_mode = "cross"
+        order_notional_usdt = _resolve_order_notional_usdt(usdt_amount, leverage, market_type)
 
         # ---- build exchange client ----
         cfg_overrides: Dict[str, Any] = {"market_type": market_type}
@@ -356,20 +400,26 @@ def place_order():
 
         client = create_exchange_client(exchange_config, market_type=market_type)
 
-        # Binance USDT-M: sync isolated/cross margin mode (best-effort; may fail if open orders exist)
-        if market_type != "spot" and margin_mode in ("cross", "isolated"):
-            try:
-                from app.services.live_trading.binance import BinanceFuturesClient
-                if isinstance(client, BinanceFuturesClient):
-                    client.set_margin_type(symbol=symbol, margin_mode=margin_mode)
-            except Exception as me:
-                logger.warning(f"Binance set_margin_type failed (non-fatal): {me}")
+        if market_type == "swap":
+            from app.services.live_trading.account_configuration import configure_derivatives_account
 
-        # ---- Convert USDT amount to base asset quantity ----
-        # Quick trade always accepts USDT amount, convert to base qty for all exchanges
-        # For limit orders, use the provided price; for market orders, fetch current price
+            configure_derivatives_account(
+                client,
+                exchange_id=exchange_id,
+                symbol=symbol,
+                leverage=leverage,
+                margin_mode=margin_mode,
+            )
+
+        # Spot input is quote notional. Swap input is margin and expands by leverage.
         limit_price_for_conversion = price if order_type == "limit" and price > 0 else 0.0
-        base_qty = _convert_usdt_to_base_qty(client, symbol, usdt_amount, market_type, limit_price_for_conversion)
+        base_qty = _convert_usdt_to_base_qty(
+            client,
+            symbol,
+            order_notional_usdt,
+            market_type,
+            limit_price_for_conversion,
+        )
 
         quote_for_buy = 0.0
         if market_type == "spot":
@@ -437,46 +487,14 @@ def place_order():
                     except Exception as be:
                         logger.warning("spot buy balance pre-check skipped: %s", be)
         
-        # Validate conversion: if base_qty equals usdt_amount, conversion likely failed
-        # For swap markets, base_qty should be much smaller than usdt_amount (e.g., 100 USDT -> 0.033 ETH)
-        if market_type != "spot" and base_qty == usdt_amount and usdt_amount >= 1:
-            logger.error(f"USDT conversion may have failed: base_qty ({base_qty}) equals usdt_amount ({usdt_amount})")
+        # Validate conversion: equal values usually mean the price lookup fallback was used.
+        if market_type != "spot" and base_qty == order_notional_usdt and order_notional_usdt >= 1:
+            logger.error(
+                "USDT conversion may have failed: base_qty (%s) equals order_notional_usdt (%s)",
+                base_qty,
+                order_notional_usdt,
+            )
             logger.error(f"This suggests the price fetch failed. Order may fail due to insufficient margin.")
-
-        # ---- set leverage (futures only) ----
-        if market_type != "spot" and leverage > 1:
-            try:
-                if hasattr(client, "set_leverage"):
-                    from app.services.live_trading.okx import OkxClient
-                    from app.services.live_trading.gate import GateUsdtFuturesClient
-                    
-                    # OKX requires inst_id instead of symbol
-                    if isinstance(client, OkxClient):
-                        from app.services.live_trading.symbols import to_okx_swap_inst_id
-                        inst_id = to_okx_swap_inst_id(symbol)
-                        client.set_leverage(inst_id=inst_id, lever=leverage)
-                    # Gate requires contract (currency_pair) instead of symbol
-                    elif isinstance(client, GateUsdtFuturesClient):
-                        from app.services.live_trading.symbols import to_gate_currency_pair
-                        contract = to_gate_currency_pair(symbol)
-                        if not client.set_leverage(contract=contract, leverage=leverage):
-                            logger.warning(
-                                "Gate set_leverage failed (contract=%s lev=%s); order may use exchange default leverage",
-                                contract,
-                                leverage,
-                            )
-                    # Most other exchanges use symbol
-                    else:
-                        # Try common parameter names
-                        try:
-                            client.set_leverage(symbol=symbol, leverage=leverage)
-                        except TypeError:
-                            try:
-                                client.set_leverage(symbol=symbol, lever=leverage)
-                            except TypeError:
-                                pass
-            except Exception as le:
-                logger.warning(f"set_leverage failed (non-fatal): {le}")
 
         # ---- swap margin pre-check ----
         # 50 USDT notional at leverage=1 needs ~50 USDT collateral. Many users
@@ -486,11 +504,11 @@ def place_order():
         if market_type != "spot" and order_type == "market":
             try:
                 ref_price = price if price > 0 else 0.0
-                if ref_price <= 0 and usdt_amount > 0 and base_qty > 0:
-                    ref_price = float(usdt_amount) / float(base_qty)
+                if ref_price <= 0 and order_notional_usdt > 0 and base_qty > 0:
+                    ref_price = float(order_notional_usdt) / float(base_qty)
                 notional_usdt = float(base_qty or 0) * float(ref_price or 0)
                 if notional_usdt <= 0:
-                    notional_usdt = float(usdt_amount or 0)
+                    notional_usdt = float(order_notional_usdt or 0)
                 lev = max(int(leverage or 1), 1)
                 # Add a small safety buffer (taker fee + funding accrual + slippage)
                 est_margin = (notional_usdt / lev) * 1.05
@@ -565,6 +583,8 @@ def place_order():
         # surfaces were optimistic. Mirrors the strategy worker's behaviour.
         commission = 0.0
         commission_ccy = ""
+        commission_quote = None
+        exchange_status = ""
         if exchange_order_id:
             enrich = enrich_fill(
                 client,
@@ -578,6 +598,54 @@ def place_order():
                 avg_fill = float(enrich["avg_price"])
             commission = float(enrich.get("fee") or 0.0)
             commission_ccy = str(enrich.get("fee_ccy") or "")
+            exchange_status = str(enrich.get("status") or "")
+            from app.services.live_trading.fee_quote import fee_to_quote
+            commission_quote = fee_to_quote(
+                client,
+                symbol=symbol,
+                fee=commission,
+                fee_ccy=commission_ccy,
+                fill_price=avg_fill,
+            )
+
+        protection_result: list[Dict[str, Any]] = []
+        protection_error = ""
+        try:
+            protection_result = attach_quick_trade_protection(
+                client,
+                symbol=symbol,
+                side=side,
+                filled_qty=filled,
+                avg_price=avg_fill,
+                tp_price=tp_price,
+                sl_price=sl_price,
+                market_type=market_type,
+                exchange_config=exchange_config,
+                leverage=leverage,
+                margin_mode=margin_mode,
+                client_order_id=f"{client_order_id}p",
+            )
+        except Exception as protection_exc:
+            protection_error = str(protection_exc)
+            logger.error("Quick Trade native protection failed order=%s: %s", exchange_order_id, protection_exc)
+
+        status = quick_order_status(
+            requested_qty=base_qty,
+            filled_qty=filled,
+            exchange_status=exchange_status,
+        )
+        raw_record = dict(raw) if isinstance(raw, dict) else {"raw": raw}
+        raw_record["_quick_trade"] = {
+            "requested_base_qty": base_qty,
+            "input_amount_usdt": usdt_amount,
+            "notional_usdt": order_notional_usdt,
+            "amount_semantics": "margin" if market_type == "swap" else "quote_notional",
+            "exchange_status": exchange_status,
+            "native_protection": protection_result,
+            "native_protection_error": protection_error,
+            "protected_filled_qty": filled if protection_result else 0.0,
+            "margin_mode": margin_mode,
+        }
 
         # ---- record trade ----
         # Record original USDT amount, not converted base qty
@@ -594,15 +662,17 @@ def place_order():
             market_type=market_type,
             tp_price=tp_price,
             sl_price=sl_price,
-            status="filled" if filled > 0 else "submitted",
+            status=status,
             exchange_order_id=exchange_order_id,
             filled=filled,
             avg_price=avg_fill,
             error_msg="",
             source=source,
-            raw_result=raw,
+            raw_result=raw_record,
             commission=commission,
             commission_ccy=commission_ccy,
+            commission_quote=commission_quote,
+            client_order_id=client_order_id,
         )
 
         return jsonify({
@@ -613,7 +683,11 @@ def place_order():
                 "exchange_order_id": exchange_order_id,
                 "filled": filled,
                 "avg_price": avg_fill,
-                "status": "filled" if filled > 0 else "submitted",
+                "status": status,
+                "margin_amount": usdt_amount if market_type == "swap" else None,
+                "notional_amount": order_notional_usdt,
+                "protection_status": "failed" if protection_error else ("attached" if protection_result else "not_requested"),
+                "protection_error": protection_error,
             },
         })
 
@@ -1018,7 +1092,7 @@ def _fetch_exchange_positions_raw(
                     q["positionAmt"] = base_amt
                     # Preserve direction for _parse_positions. Gate encodes short as
                     # negative contract size but positionAmt is always positive.
-                    q["positionSide"] = "LONG" if ct_sz > 0 else "SHORT"
+                    q["positionSide"] = infer_position_side_from_row(q).upper()
             out.append(q)
         logger.info("Gate filtered positions for %s: %d items, sizes=%s", c, len(out),
                      [(p.get("size"), p.get("positionAmt")) for p in out])
@@ -1178,14 +1252,10 @@ def _normalize_okx_positions_raw(raw: Any) -> Any:
 
 
 def _extract_signed_position_qty(item: dict) -> float:
-    from app.services.live_trading.position_row_parse import extract_signed_position_qty
-
     return extract_signed_position_qty(item)
 
 
 def _infer_position_side_from_row(item: dict) -> str:
-    from app.services.live_trading.position_row_parse import infer_position_side_from_row
-
     return infer_position_side_from_row(item)
 
 
@@ -1243,6 +1313,23 @@ def _parse_positions(raw: Any) -> list:
 
             side = _infer_position_side_from_row(item)
 
+            notional_usdt = 0.0
+            for notional_key in (
+                "notionalUsd",
+                "notional_usd",
+                "notional",
+                "positionValue",
+                "position_value",
+                "value",
+            ):
+                try:
+                    candidate = abs(float(item.get(notional_key) or 0.0))
+                except (TypeError, ValueError):
+                    candidate = 0.0
+                if candidate > 0:
+                    notional_usdt = candidate
+                    break
+
             result.append({
                 "symbol": display_symbol,
                 "side": side,
@@ -1282,6 +1369,7 @@ def _parse_positions(raw: Any) -> list:
                     or item.get("indexPrice")
                     or 0
                 ),
+                "notional_usdt": notional_usdt,
             })
     except Exception as e:
         logger.warning(f"_parse_positions error: {e}")
@@ -1334,7 +1422,8 @@ def _quick_trade_net_base_qty(
 
 @quick_trade_blp.route('/close-position', methods=['POST'])
 @login_required
-def close_position():
+@quick_trade_blp.arguments(QuickTradeCloseRequestSchema, location="json")
+def close_position(body):
     """
     Close an existing position.
     
@@ -1349,8 +1438,6 @@ def close_position():
     """
     try:
         user_id = g.user_id
-        body = request.get_json(force=True, silent=True) or {}
-        
         credential_id = int(body.get("credential_id") or 0)
         symbol = str(body.get("symbol") or "").strip()
         market_type = str(body.get("market_type") or "swap").strip().lower()
@@ -1541,6 +1628,8 @@ def close_position():
         # the realised commission.
         commission = 0.0
         commission_ccy = ""
+        commission_quote = None
+        exchange_status = ""
         if exchange_order_id:
             enrich = enrich_fill(
                 client,
@@ -1554,6 +1643,26 @@ def close_position():
                 avg_fill = float(enrich["avg_price"])
             commission = float(enrich.get("fee") or 0.0)
             commission_ccy = str(enrich.get("fee_ccy") or "")
+            exchange_status = str(enrich.get("status") or "")
+            from app.services.live_trading.fee_quote import fee_to_quote
+            commission_quote = fee_to_quote(
+                client,
+                symbol=symbol,
+                fee=commission,
+                fee_ccy=commission_ccy,
+                fill_price=avg_fill,
+            )
+
+        status = quick_order_status(
+            requested_qty=actual_close_size,
+            filled_qty=filled,
+            exchange_status=exchange_status,
+        )
+        raw_record = dict(raw) if isinstance(raw, dict) else {"raw": raw}
+        raw_record["_quick_trade"] = {
+            "requested_base_qty": actual_close_size,
+            "exchange_status": exchange_status,
+        }
 
         # ---- calculate USDT amount for recording ----
         # Convert base asset quantity to USDT amount for consistent recording
@@ -1581,15 +1690,16 @@ def close_position():
             market_type=market_type,
             tp_price=0,
             sl_price=0,
-            status="filled" if filled > 0 else "submitted",
+            status=status,
             exchange_order_id=exchange_order_id,
             filled=filled,
             avg_price=avg_fill,
             error_msg="",
             source=source,
-            raw_result=raw,
+            raw_result=raw_record,
             commission=commission,
             commission_ccy=commission_ccy,
+            commission_quote=commission_quote,
         )
         
         return jsonify({
@@ -1604,7 +1714,7 @@ def close_position():
                 "position_side": position_side,
                 "close_scope": close_scope,
                 "tracked_net_base": tracked_net if close_scope == "system_tracked" else None,
-                "status": "filled" if filled > 0 else "submitted",
+                "status": status,
             },
         })
         
@@ -1683,4 +1793,3 @@ def get_history():
 
 # openapi-compat: legacy import name
 quick_trade_bp = quick_trade_blp
-

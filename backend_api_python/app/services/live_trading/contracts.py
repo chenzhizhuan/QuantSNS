@@ -23,6 +23,7 @@ class OrderIntent:
     pos_side: str = ""
     reduce_only: bool = False
     client_order_id: Optional[str] = None
+    fallback_client_order_id: Optional[str] = None
     leverage: float = 1.0
     margin_mode: str = "cross"
     post_only: bool = False
@@ -36,6 +37,7 @@ class FillSnapshot:
     avg_price: float
     status: str
     raw: Dict[str, Any] = field(default_factory=dict)
+    fees_by_ccy: Dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

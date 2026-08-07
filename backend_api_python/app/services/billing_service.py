@@ -419,28 +419,37 @@ class BillingService:
         if not self.is_billing_enabled():
             return True, 'billing_disabled'
         
-        config = self.get_billing_config()
         cost = self.get_feature_cost(feature)
         
         if cost <= 0:
             return True, 'free_feature'
 
 
-        credits = self.get_user_credits(user_id)
-        if credits < cost:
-            return False, f'insufficient_credits:{credits}:{cost}'
-        
         try:
-            new_balance = credits - Decimal(str(cost))
-            
             with get_db_connection() as db:
                 cur = db.cursor()
-                
+
+                # Check and deduct in one statement so concurrent requests
+                # cannot both spend the same credits.
                 cur.execute(
-                    "UPDATE qd_users SET credits = ?, updated_at = NOW() WHERE id = ?",
-                    (float(new_balance), user_id)
+                    """
+                    UPDATE qd_users
+                    SET credits = credits - ?, updated_at = NOW()
+                    WHERE id = ? AND credits >= ?
+                    RETURNING credits
+                    """,
+                    (cost, user_id, cost),
                 )
-                
+                updated = cur.fetchone()
+                if not updated:
+                    cur.execute("SELECT credits FROM qd_users WHERE id = ?", (user_id,))
+                    current = cur.fetchone() or {}
+                    credits = Decimal(str(current.get('credits', 0) or 0))
+                    db.rollback()
+                    cur.close()
+                    return False, f'insufficient_credits:{credits}:{cost}'
+
+                new_balance = Decimal(str(updated.get('credits', 0) or 0))
                 feature_name = FEATURE_NAMES.get(feature, feature)
                 created_at_utc = datetime.now(timezone.utc)
                 cur.execute(
@@ -482,12 +491,26 @@ class BillingService:
             return False, 'amount_must_be_positive'
         
         try:
-            credits = self.get_user_credits(user_id)
-            new_balance = credits + Decimal(str(amount))
-            
             with get_db_connection() as db:
                 cur = db.cursor()
-                
+                cur.execute("SELECT credits FROM qd_users WHERE id = ? FOR UPDATE", (user_id,))
+                row = cur.fetchone() or {}
+                if reference_id:
+                    cur.execute(
+                        """
+                        SELECT balance_after FROM qd_credits_log
+                        WHERE user_id = ? AND action = ? AND reference_id = ?
+                        ORDER BY id DESC LIMIT 1
+                        """,
+                        (user_id, action, reference_id),
+                    )
+                    existing = cur.fetchone()
+                    if existing:
+                        cur.close()
+                        return True, str(existing.get("balance_after") or "")
+
+                credits = Decimal(str(row.get("credits", 0) or 0))
+                new_balance = credits + Decimal(str(amount))
                 cur.execute(
                     "UPDATE qd_users SET credits = ?, updated_at = NOW() WHERE id = ?",
                     (float(new_balance), user_id)
@@ -689,8 +712,11 @@ class BillingService:
             'vip_expires_at': vip_expires_at.isoformat() if vip_expires_at else None,
             'billing_enabled': config.get('enabled', False),
             'feature_costs': {
+                'backtest': config.get('cost_backtest', 30),
+                'ai_review': config.get('cost_ai_review', 10),
                 'ai_analysis': config.get('cost_ai_analysis', 0),
                 'ai_code_gen': config.get('cost_ai_code_gen', 0),
+                'ai_indicator_to_strategy': config.get('cost_ai_indicator_to_strategy', 0),
                 'ai_tuning': config.get('cost_ai_tuning', 0),
                 'ai_copilot_chat': config.get('cost_ai_copilot_chat', 0),
                 'ai_copilot_image': config.get('cost_ai_copilot_image', 0),
@@ -708,4 +734,3 @@ def get_billing_service() -> BillingService:
     if _billing_service is None:
         _billing_service = BillingService()
     return _billing_service
-

@@ -22,15 +22,17 @@ from app.services.live_trading.symbols import to_binance_futures_symbol
 
 
 class BinanceFuturesClient(BaseRestClient):
+    _BROKER_ID = "HBpUbQjT"
+
     def __init__(self, *, api_key: str, secret_key: str, base_url: str = None, enable_demo_trading: bool = False, timeout_sec: float = 15.0, broker_id: str = ""):
         if not base_url:
-            # Binance USDT-M Futures Testnet (official): https://testnet.binancefuture.com
-            base_url = "https://testnet.binancefuture.com" if enable_demo_trading else "https://fapi.binance.com"
+            # Binance USD-M Futures demo REST endpoint.
+            base_url = "https://demo-fapi.binance.com" if enable_demo_trading else "https://fapi.binance.com"
 
         super().__init__(base_url=base_url, timeout_sec=timeout_sec)
         self.api_key = (api_key or "").strip()
         self.secret_key = (secret_key or "").strip()
-        self.broker_id = (broker_id or "").strip()
+        self.broker_id = self._BROKER_ID
         if not self.api_key or not self.secret_key:
             raise LiveTradingError("Missing Binance api_key/secret_key")
 
@@ -262,6 +264,33 @@ class BinanceFuturesClient(BaseRestClient):
         except Exception:
             return 0.0
 
+    def get_funding_payments(self, *, symbol: str, start_time_ms: int, end_time_ms: int, limit: int = 100):
+        sym = to_binance_futures_symbol(symbol)
+        raw = self._signed_request(
+            "GET",
+            "/fapi/v1/income",
+            params={
+                "symbol": sym,
+                "incomeType": "FUNDING_FEE",
+                "startTime": int(start_time_ms),
+                "endTime": int(end_time_ms),
+                "limit": min(1000, max(1, int(limit or 100))),
+            },
+        )
+        rows = raw.get("raw") if isinstance(raw, dict) else raw
+        if not isinstance(rows, list):
+            return []
+        return [
+            {
+                "id": str(item.get("tranId") or f"{item.get('time')}:{item.get('income')}"),
+                "symbol": str(item.get("symbol") or sym),
+                "amount": float(item.get("income") or 0.0),
+                "asset": str(item.get("asset") or "USDT").upper(),
+                "time": int(item.get("time") or 0),
+                "raw": item,
+            }
+            for item in rows if isinstance(item, dict)
+        ]
     def get_symbol_filters(self, *, symbol: str) -> Dict[str, Any]:
         """
         Get futures symbol filters from exchangeInfo (best-effort).
@@ -508,8 +537,22 @@ class BinanceFuturesClient(BaseRestClient):
         if lev < 1:
             lev = 1
         if lev > 125:
-            lev = 125
-        return self._signed_request("POST", "/fapi/v1/leverage", params={"symbol": sym, "leverage": lev})
+            raise LiveTradingError(f"Binance leverage {lev}x exceeds the API maximum 125x")
+        response = self._signed_request(
+            "POST", "/fapi/v1/leverage", params={"symbol": sym, "leverage": lev}
+        )
+        if isinstance(response, dict) and response.get("leverage") not in (None, ""):
+            try:
+                effective = int(float(response.get("leverage")))
+            except (TypeError, ValueError) as exc:
+                raise LiveTradingError(
+                    f"Binance returned an invalid effective leverage: {response.get('leverage')}"
+                ) from exc
+            if effective != lev:
+                raise LiveTradingError(
+                    f"Binance applied {effective}x instead of requested {lev}x leverage"
+                )
+        return response
 
     def get_dual_side_position(self) -> Optional[bool]:
         """
@@ -649,24 +692,24 @@ class BinanceFuturesClient(BaseRestClient):
                     avg_price = 0.0
 
             if filled > 0 and avg_price > 0:
-                fee, fee_ccy = self._fetch_commission_for_order(symbol=symbol, order_id=order_id, filled=filled, avg_price=avg_price)
-                return {"filled": filled, "avg_price": avg_price, "fee": fee, "fee_ccy": fee_ccy, "status": status, "order": last}
+                fee, fee_ccy, fees = self._fetch_commission_for_order(symbol=symbol, order_id=order_id, filled=filled, avg_price=avg_price)
+                return {"filled": filled, "avg_price": avg_price, "fee": fee, "fee_ccy": fee_ccy, "fees_by_ccy": fees, "status": status, "order": last}
 
             if status in ("FILLED", "CANCELED", "EXPIRED", "REJECTED"):
-                fee, fee_ccy = 0.0, ""
+                fee, fee_ccy, fees = 0.0, "", {}
                 if filled > 0:
-                    fee, fee_ccy = self._fetch_commission_for_order(symbol=symbol, order_id=order_id, filled=filled, avg_price=avg_price)
-                return {"filled": filled, "avg_price": avg_price, "fee": fee, "fee_ccy": fee_ccy, "status": status, "order": last}
+                    fee, fee_ccy, fees = self._fetch_commission_for_order(symbol=symbol, order_id=order_id, filled=filled, avg_price=avg_price)
+                return {"filled": filled, "avg_price": avg_price, "fee": fee, "fee_ccy": fee_ccy, "fees_by_ccy": fees, "status": status, "order": last}
 
             if time.time() >= end_ts:
-                fee, fee_ccy = 0.0, ""
+                fee, fee_ccy, fees = 0.0, "", {}
                 if filled > 0:
-                    fee, fee_ccy = self._fetch_commission_for_order(symbol=symbol, order_id=order_id, filled=filled, avg_price=avg_price)
-                return {"filled": filled, "avg_price": avg_price, "fee": fee, "fee_ccy": fee_ccy, "status": status, "order": last}
+                    fee, fee_ccy, fees = self._fetch_commission_for_order(symbol=symbol, order_id=order_id, filled=filled, avg_price=avg_price)
+                return {"filled": filled, "avg_price": avg_price, "fee": fee, "fee_ccy": fee_ccy, "fees_by_ccy": fees, "status": status, "order": last}
             time.sleep(float(poll_interval_sec or 0.5))
 
-    def _fetch_commission_for_order(self, *, symbol: str, order_id: str, filled: float, avg_price: float) -> Tuple[float, str]:
-        """Fetch real commission from userTrades; fall back to commissionRate calculation."""
+    def _fetch_commission_for_order(self, *, symbol: str, order_id: str, filled: float, avg_price: float) -> Tuple[float, str, Dict[str, float]]:
+        """Fetch authoritative per-fill commission from USD-M futures trades."""
         oid = str(order_id or "").strip()
         # Method 1: userTrades (up to 3 attempts with 1s delay)
         for attempt in range(3):
@@ -674,8 +717,7 @@ class BinanceFuturesClient(BaseRestClient):
                 trades = self.get_user_trades(symbol=symbol, order_id=oid, limit=200) if oid else []
                 if not isinstance(trades, list):
                     trades = []
-                total_fee = 0.0
-                fee_ccy = ""
+                fees: Dict[str, float] = {}
                 for t in trades:
                     if not isinstance(t, dict):
                         continue
@@ -685,12 +727,13 @@ class BinanceFuturesClient(BaseRestClient):
                         c = 0.0
                     ccy = str(t.get("commissionAsset") or "").strip()
                     if c != 0.0:
-                        total_fee += abs(c)
-                        if not fee_ccy and ccy:
-                            fee_ccy = ccy
-                if total_fee > 0:
-                    logger.debug("Binance fee via userTrades: %.8f %s (order=%s, attempt=%d)", total_fee, fee_ccy, oid, attempt)
-                    return total_fee, fee_ccy
+                        key = ccy.upper() if ccy else "UNKNOWN"
+                        fees[key] = fees.get(key, 0.0) + abs(c)
+                if fees:
+                    fee_ccy = next(iter(fees)) if len(fees) == 1 else "MIXED"
+                    total_fee = sum(fees.values()) if len(fees) == 1 else 0.0
+                    logger.debug("Binance fee via userTrades: %s (order=%s, attempt=%d)", fees, oid, attempt)
+                    return total_fee, fee_ccy, fees
                 if attempt < 2:
                     time.sleep(1.5)
             except Exception as e:
@@ -698,21 +741,16 @@ class BinanceFuturesClient(BaseRestClient):
                 if attempt < 2:
                     time.sleep(1.0)
 
-        # Method 2: calculate from commissionRate
-        if filled > 0 and avg_price > 0:
-            try:
-                rate_info = self.get_fee_rate(symbol=symbol)
-                if rate_info:
-                    taker_rate = float(rate_info.get("taker") or 0.0)
-                    if taker_rate > 0:
-                        calc_fee = filled * avg_price * taker_rate
-                        logger.info("Binance fee via commissionRate: %.8f USDT (rate=%.6f, order=%s)", calc_fee, taker_rate, oid)
-                        return calc_fee, "USDT"
-            except Exception as e:
-                logger.warning("Binance commissionRate fallback failed: %s", e)
-
-        logger.warning("Binance could not obtain fee for order=%s symbol=%s", oid, symbol)
-        return 0.0, ""
+        # Do not reconstruct historical fees from the account's current rate.
+        # userTrades is the authoritative source for both the charged amount and
+        # the actual commission asset. The reconciliation worker retries later
+        # when Binance has not exposed the fill rows yet.
+        logger.warning(
+            "Binance userTrades has no authoritative fee yet for order=%s symbol=%s",
+            oid,
+            symbol,
+        )
+        return 0.0, "", {}
 
     def place_market_order(
         self,
@@ -1014,4 +1052,28 @@ class BinanceFuturesClient(BaseRestClient):
         sym = to_binance_futures_symbol(want)
         return [p for p in rows if isinstance(p, dict) and str(p.get("symbol") or "") == sym]
 
+    def get_symbol_configuration(self, *, symbol: str) -> Dict[str, Any]:
+        """Read back symbol-level margin mode and leverage from positionRisk.
 
+        Binance documents both ``marginType`` and ``leverage`` on
+        ``GET /fapi/v2/positionRisk``.  This read is used to resolve the
+        ambiguous outcome of a ``-1007`` timeout from configuration POSTs.
+        """
+        rows = self.get_positions(symbol=symbol) or []
+        row = next((item for item in rows if isinstance(item, dict)), None)
+        if not row:
+            raise LiveTradingError(f"Binance symbol configuration unavailable: {symbol}")
+        mode = str(row.get("marginType") or "").strip().lower()
+        if mode in {"cross", "crossed"}:
+            mode = "cross"
+        elif mode in {"isolated", "iso"}:
+            mode = "isolated"
+        try:
+            leverage = int(float(row.get("leverage") or 0))
+        except Exception:
+            leverage = 0
+        return {
+            "symbol": str(row.get("symbol") or to_binance_futures_symbol(symbol)),
+            "margin_mode": mode,
+            "leverage": leverage,
+        }

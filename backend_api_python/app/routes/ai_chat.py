@@ -9,7 +9,8 @@ from __future__ import annotations
 import json
 import math
 import re
-from datetime import date, datetime
+import requests
+from datetime import date, datetime, timezone
 from typing import Any
 
 from flask import Response, g, jsonify, request, stream_with_context
@@ -43,7 +44,7 @@ from app.services.ai_copilot_store import (
 )
 from app.services.ai_report_pdf import build_ai_report_pdf
 from app.services.kline import KlineService
-from app.services.llm import LLMService
+from app.services.llm import LLMAPIError, LLMService
 from app.services.search import get_search_service
 from app.config.data_sources import AkshareConfig, TradingEconomicsConfig
 from app.data.market_symbols_seed import search_symbols as seed_search_symbols
@@ -62,9 +63,28 @@ MAX_IMAGES = 3
 MAX_IMAGE_DATA_URL_CHARS = 4 * 1024 * 1024
 ALLOWED_IMAGE_MIME = {"image/png", "image/jpeg", "image/webp"}
 
+AGENT_RESPONSE_LANGUAGES = {
+    "ar-sa": "Arabic",
+    "de-de": "German",
+    "en-us": "English",
+    "fr-fr": "French",
+    "ja-jp": "Japanese",
+    "ko-kr": "Korean",
+    "ru-ru": "Russian",
+    "th-th": "Thai",
+    "vi-vn": "Vietnamese",
+    "zh-cn": "Simplified Chinese",
+    "zh-tw": "Traditional Chinese",
+}
+
 
 def _now_utc() -> datetime:
     return store_now_utc()
+
+
+def _agent_response_language_name(language: str) -> str:
+    normalized = str(language or "").strip().replace("_", "-").lower()
+    return AGENT_RESPONSE_LANGUAGES.get(normalized, "English")
 
 
 def _json_dumps(value: Any) -> str:
@@ -121,7 +141,12 @@ def _detect_intent(message: str, has_image: bool) -> str:
         return "market_analysis"
     if any(k in text for k in ("多少钱", "价格", "股价", "估值", "市值", "报价", "现价", "最新价", "quote", "valuation")):
         return "market_analysis"
-    if any(k in text for k in ("策略", "indicator", "script", "代码", "code", "write strategy", "生成")):
+    if any(k in text for k in (
+        "策略", "indicator", "script", "代码", "code", "write strategy", "生成",
+        "戦略", "インジケーター", "전략", "지표", "strategie", "indikator",
+        "stratégie", "indicateur", "стратег", "индикатор", "chiến lược", "chỉ báo",
+        "กลยุทธ์", "อินดิเคเตอร์", "استراتيجية", "مؤشر",
+    )):
         return "strategy_build"
     if any(k in text for k in ("诊断", "报错", "错误", "亏损", "日志", "debug", "bug", "why")):
         return "diagnosis"
@@ -134,7 +159,12 @@ def _detect_intent(message: str, has_image: bool) -> str:
     return "general"
 
 
-def _fallback_agent_intent(message: str, has_image: bool, context: dict | None = None) -> dict:
+def _fallback_agent_intent(
+    message: str,
+    has_image: bool,
+    context: dict | None = None,
+    language: str = "zh-CN",
+) -> dict:
     """Conservative intent fallback used only when the configured LLM is unavailable."""
     text = (message or "").lower()
     base_intent = _detect_intent(message, has_image)
@@ -146,17 +176,27 @@ def _fallback_agent_intent(message: str, has_image: bool, context: dict | None =
     if base_intent == "strategy_build":
         should_execute = any(k in text for k in (
             "创建", "生成", "写", "做一个", "能跑", "可运行", "回测", "create",
-            "generate", "build", "write", "runnable", "backtest"
+            "generate", "build", "write", "runnable", "backtest", "作成", "生成して",
+            "만들", "생성", "erstell", "generier", "crée", "génère", "созда",
+            "сгенер", "tạo", "viết", "สร้าง", "เขียน", "أنشئ", "اكتب"
         ))
-        if any(k in text for k in ("机器人", "bot", "grid", "dca", "martingale", "网格", "马丁")):
-            target_type = "bot"
-            workflow = "trading_bot"
+        if any(k in text for k in (
+            "指标", "看图", "图表", "indicator", "chart-only", "visual", "overlay",
+            "インジケーター", "チャート", "지표", "차트", "indikator", "diagramm",
+            "indicateur", "graphique", "индикатор", "график", "chỉ báo", "biểu đồ",
+            "อินดิเคเตอร์", "กราฟ", "مؤشر", "مخطط",
+        )):
+            target_type = "indicator"
+            workflow = "indicator_ide"
+        elif any(k in text for k in ("机器人", "bot", "grid", "dca", "martingale", "网格", "马丁")):
+            target_type = "script"
+            workflow = "script_strategy"
         elif any(k in text for k in ("脚本", "script", "python")):
             target_type = "script"
             workflow = "script_strategy"
         else:
-            target_type = "indicator"
-            workflow = "indicator_ide"
+            target_type = "script"
+            workflow = "script_strategy"
     elif base_intent in ("market_analysis", "chart_image_analysis"):
         workflow = "research"
 
@@ -175,10 +215,13 @@ def _fallback_agent_intent(message: str, has_image: bool, context: dict | None =
         "entities": {
             "symbol": selected_symbol,
             "market": (context or {}).get("market") or (context or {}).get("resolved_market") or "",
-            "timeframe": "",
+            "timeframe": (context or {}).get("timeframe") or "",
+            "exchange_id": (context or {}).get("exchange_id") or (context or {}).get("exchangeId") or "",
+            "market_type": (context or {}).get("market_type") or (context or {}).get("marketType") or "",
+            "instrument_id": (context or {}).get("instrument_id") or (context or {}).get("instrumentId") or "",
             "strategy_template": "",
         },
-        "skills": [skill.to_public("zh-CN") for skill in match_skills(message, base_intent, limit=5)],
+        "skills": [skill.to_public(language) for skill in match_skills(message, base_intent, limit=5)],
         "next_action": "ask_missing_fields" if required_missing else ("execute_workflow" if should_execute else "answer_chat"),
         "reason": "LLM intent router unavailable; used conservative fallback.",
     }
@@ -198,14 +241,16 @@ def _normalize_agent_intent(raw: dict, message: str, has_image: bool, context: d
         intent = _detect_intent(message, has_image)
 
     target_type = str(raw.get("target_type") or "none").strip()
-    if target_type not in {"none", "indicator", "script", "bot", "monitor", "research"}:
+    if target_type == "bot":
+        target_type = "script"
+    if target_type not in {"none", "indicator", "script", "monitor", "research"}:
         target_type = "none"
     workflow = str(raw.get("workflow") or "").strip()
-    if workflow not in {"chat", "research", "indicator_ide", "script_strategy", "trading_bot", "scheduled_analysis", "backtest", "debug"}:
+    if workflow not in {"chat", "research", "indicator_ide", "script_strategy", "scheduled_analysis", "backtest", "debug"}:
         workflow = "chat"
     if intent == "strategy_build" and target_type == "none":
-        target_type = "indicator"
-        workflow = "indicator_ide"
+        target_type = "script"
+        workflow = "script_strategy"
 
     entities = raw.get("entities") if isinstance(raw.get("entities"), dict) else {}
     selected_symbol = context.get("resolved_symbol") or context.get("mentioned_symbol") or context.get("symbol") or context.get("selected_symbol") or ""
@@ -213,7 +258,10 @@ def _normalize_agent_intent(raw: dict, message: str, has_image: bool, context: d
     entities = {
         "symbol": str(entities.get("symbol") or selected_symbol or "").strip(),
         "market": str(entities.get("market") or selected_market or "").strip(),
-        "timeframe": str(entities.get("timeframe") or "").strip(),
+        "timeframe": str(entities.get("timeframe") or context.get("timeframe") or "").strip(),
+        "exchange_id": str(entities.get("exchange_id") or context.get("exchange_id") or context.get("exchangeId") or "").strip(),
+        "market_type": str(entities.get("market_type") or context.get("market_type") or context.get("marketType") or "").strip(),
+        "instrument_id": str(entities.get("instrument_id") or context.get("instrument_id") or context.get("instrumentId") or "").strip(),
         "strategy_template": str(entities.get("strategy_template") or "").strip(),
         "asset_class": str(entities.get("asset_class") or "").strip(),
     }
@@ -258,17 +306,18 @@ def _normalize_agent_intent(raw: dict, message: str, has_image: bool, context: d
 def _classify_agent_intent(message: str, attachments: list[dict], context: dict, language: str) -> dict:
     """Use the configured LLM as the canonical Agent intent router."""
     has_image = bool(attachments)
-    fallback = _fallback_agent_intent(message, has_image, context)
+    fallback = _fallback_agent_intent(message, has_image, context, language)
     system_prompt = (
         "You are the QuantDinger Agent Intent Router. Classify the user's message into a "
         "workflow plan for a global quantitative trading terminal. Return JSON only. "
         "Do not answer the user. Decide whether this is chat/research or an executable "
-        "workflow such as strategy creation, backtest, scheduled analysis, bot creation, or debugging. "
-        "For strategy creation, prefer QuantDinger native workflows: indicator_ide for chart/backtest "
-        "strategies, script_strategy for Python ScriptStrategy, trading_bot for bot presets. "
+        "workflow such as indicator creation, strategy creation, backtest, or scheduled analysis. "
+        "For creation, use indicator_ide only for chart-only indicators and visual overlays. "
+        "Use script_strategy for executable Strategy API V2 sources, backtestable strategies, live strategies, robots, or template-style requests. "
+        "Preserve selected timeframe, exchange_id, market_type, and instrument_id in entities. A missing timeframe is not blocking for strategy creation because the source generator chooses a conservative source-owned default. "
         "If the user asks to create/build/write/generate a runnable strategy and enough target context "
         "is available, set should_execute=true. If required data is missing, list it in required_missing. "
-        "Support Chinese, English, and mixed multilingual prompts."
+        "Support every configured UI language and mixed multilingual prompts."
     )
     schema = {
         "intent": fallback["intent"],
@@ -282,6 +331,9 @@ def _classify_agent_intent(message: str, attachments: list[dict], context: dict,
             "symbol": "",
             "market": "",
             "timeframe": "",
+            "exchange_id": "",
+            "market_type": "",
+            "instrument_id": "",
             "strategy_template": "",
             "asset_class": "",
         },
@@ -298,6 +350,10 @@ def _classify_agent_intent(message: str, attachments: list[dict], context: dict,
             "symbol": context.get("symbol") or context.get("selected_symbol") or "",
             "resolved_market": context.get("resolved_market") or "",
             "resolved_symbol": context.get("resolved_symbol") or "",
+            "timeframe": context.get("timeframe") or "",
+            "exchange_id": context.get("exchange_id") or context.get("exchangeId") or "",
+            "market_type": context.get("market_type") or context.get("marketType") or "",
+            "instrument_id": context.get("instrument_id") or context.get("instrumentId") or "",
         },
         "available_intents": [
             "general", "market_analysis", "chart_image_analysis", "strategy_build",
@@ -305,10 +361,10 @@ def _classify_agent_intent(message: str, attachments: list[dict], context: dict,
             "opportunity_radar", "portfolio", "settings_help"
         ],
         "available_workflows": [
-            "chat", "research", "indicator_ide", "script_strategy", "trading_bot",
+            "chat", "research", "indicator_ide", "script_strategy",
             "scheduled_analysis", "backtest", "debug"
         ],
-        "available_target_types": ["none", "indicator", "script", "bot", "monitor", "research"],
+        "available_target_types": ["none", "indicator", "script", "monitor", "research"],
     })
     try:
         raw = LLMService().safe_call_llm(system_prompt, user_prompt, schema.copy())
@@ -480,6 +536,28 @@ def _timeframe_change(klines: list[dict], bars: int) -> float | None:
     return (end - start) / start * 100
 
 
+def _format_kline_time_utc(value: Any) -> str | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        parsed = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc).isoformat()
+    try:
+        timestamp = float(value)
+        if timestamp > 10_000_000_000:
+            timestamp /= 1000
+        return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
+    except (TypeError, ValueError, OSError, OverflowError):
+        pass
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc).isoformat()
+    except (TypeError, ValueError):
+        return None
+
+
 def _summarize_klines(klines: list[dict], timeframe: str) -> dict:
     clean = []
     for k in klines or []:
@@ -528,6 +606,7 @@ def _summarize_klines(klines: list[dict], timeframe: str) -> dict:
         "available": True,
         "bars": len(clean),
         "latest_time": last.get("time"),
+        "latest_time_utc": _format_kline_time_utc(last.get("time")),
         "last_close": _round_num(last["close"], 6),
         "change_1_bar_pct": _round_num(_timeframe_change(clean, 1), 2),
         "change_6_bar_pct": _round_num(_timeframe_change(clean, 6), 2),
@@ -554,6 +633,8 @@ def _summarize_klines(klines: list[dict], timeframe: str) -> dict:
 def _build_market_snapshot(context: dict) -> dict | None:
     market = (context.get("market") or "").strip()
     symbol = (context.get("symbol") or "").strip()
+    exchange_id = (context.get("exchange_id") or context.get("exchangeId") or "").strip()
+    market_type = (context.get("market_type") or context.get("marketType") or "").strip()
     if not market or not symbol:
         return None
 
@@ -561,6 +642,8 @@ def _build_market_snapshot(context: dict) -> dict | None:
     snapshot: dict[str, Any] = {
         "symbol": symbol,
         "market": market,
+        "exchange_id": exchange_id,
+        "market_type": market_type,
         "generated_at_utc": _now_utc().isoformat(),
         "price": None,
         "timeframes": {},
@@ -573,7 +656,13 @@ def _build_market_snapshot(context: dict) -> dict | None:
     }
     snapshot["data_warnings"].append("Latest candle may be still forming; prefer prev_closed_volume_ratio_vs_avg20 for volume confirmation.")
     try:
-        price = service.get_realtime_price(market, symbol, force_refresh=True)
+        price = service.get_realtime_price(
+            market,
+            symbol,
+            force_refresh=True,
+            exchange_id=exchange_id or None,
+            market_type=market_type or None,
+        )
         if price and _to_float(price.get("price")):
             snapshot["price"] = {
                 "last": _round_num(price.get("price"), 6),
@@ -589,7 +678,14 @@ def _build_market_snapshot(context: dict) -> dict | None:
 
     for timeframe, limit in (("1H", 120), ("4H", 120), ("1D", 120)):
         try:
-            klines = service.get_kline(market, symbol, timeframe, limit)
+            klines = service.get_kline(
+                market,
+                symbol,
+                timeframe,
+                limit,
+                exchange_id=exchange_id or None,
+                market_type=market_type or None,
+            )
             snapshot["timeframes"][timeframe] = _summarize_klines(klines, timeframe)
         except Exception as e:
             snapshot["timeframes"][timeframe] = {"timeframe": timeframe, "available": False, "error": str(e)}
@@ -598,16 +694,6 @@ def _build_market_snapshot(context: dict) -> dict | None:
 
 
 _PUBLIC_COMPANY_ALIASES = {
-    "spacex": {
-        "entity": "SpaceX",
-        "market": "private_company",
-        "note": "SpaceX is a private company and has no directly traded public stock ticker.",
-        "search_terms": ("SPCX", "Space Exploration Technologies", "SpaceX"),
-        "related_public_symbols": [
-            {"market": "USStock", "symbol": "SPCX", "name": "Space Exploration Technologies Corp"},
-            {"market": "USStock", "symbol": "TSLA", "name": "Tesla"},
-        ],
-    },
     "starlink": {
         "entity": "Starlink",
         "market": "private_business_unit",
@@ -815,8 +901,6 @@ def _search_intelligence(message: str, candidates: list[dict], language: str) ->
     ticker_query = f"{entity or query_base} stock ticker symbol exchange".strip()
     if ticker_query not in queries:
         queries.append(ticker_query)
-    if "spacex" in query_base.lower() and "SpaceX valuation public stock ticker latest" not in queries:
-        queries.append("SpaceX valuation public stock ticker latest")
 
     web_results: list[dict] = []
     provider_status: list[dict] = []
@@ -1535,8 +1619,6 @@ def _agent_usage_payload(agent_plan: dict | None, context: dict, language: str) 
         workflow_name = str(plan.get("workflow") or "")
         if workflow_name == "script_strategy":
             tool_ids.append(("script_strategy.generate", "strategy_workflow"))
-        elif workflow_name == "trading_bot":
-            tool_ids.append(("trading_bot.create_stopped", "strategy_workflow"))
         else:
             tool_ids.append(("indicator.generate", "strategy_workflow"))
 
@@ -1708,7 +1790,7 @@ def _build_session_working_memory(history: list[dict], current_message: str, con
 
 
 def _build_system_prompt(language: str, context: dict, intent: str, has_image: bool, json_response: bool = True) -> str:
-    lang_name = "Chinese" if (language or "").lower().startswith("zh") else "English"
+    lang_name = _agent_response_language_name(language)
     context_bits = []
     if context.get("symbol"):
         context_bits.append(f"symbol={context.get('symbol')}")
@@ -1723,7 +1805,7 @@ def _build_system_prompt(language: str, context: dict, intent: str, has_image: b
         f"Reply in {lang_name}. Current intent={intent}; context: {context_line}. {image_line}\n"
         "Be practical and careful. Do not promise profit or invent unavailable live data. "
         "If the user asks to write strategy code, stay inside QuantDinger native workflows. "
-        "Use Indicator IDE code for indicator strategies, Python ScriptStrategy for script strategies, and Trading Bot parameters for bot workflows. "
+        "Use Indicator IDE code for chart-only indicators and Strategy API V2 Python for executable or template-style strategies. "
         "Never output Pine Script, TradingView-only code, broker-specific scripts, or unrelated platform syntax unless the user explicitly asks for that platform. "
         "For strategy work, first clarify missing requirements, then propose design, then generate runnable code only when the user confirms or asks to generate. "
         "If the user asks for market/chart diagnosis, separate observable facts from inference. "
@@ -1798,7 +1880,7 @@ def _build_system_prompt(language: str, context: dict, intent: str, has_image: b
         "Return JSON only with this schema: "
         "{\"answer\":\"markdown answer\", \"summary\":\"short title\", \"confidence\":0-100, "
         "\"actions\":[{\"type\":\"analysis|strategy|debug|risk|todo|create_monitor_task\", \"label\":\"...\", \"payload\":{}}], "
-        "\"artifact\":{\"type\":\"none|strategy_code|checklist|market_note\", \"title\":\"...\", \"content\":\"...\"}}."
+        "\"artifact\":{\"type\":\"none|strategy_source|checklist|market_note\", \"title\":\"...\", \"content\":\"...\"}}."
     )
 
 
@@ -1873,9 +1955,7 @@ def _build_preflight(user_id: int) -> dict:
     billing = get_billing_service()
     llm = LLMService()
     provider = llm.provider.value
-    api_key = llm.get_api_key(llm.provider)
-    custom_base_ok = provider == "custom" and bool(llm.get_base_url(llm.provider))
-    llm_ready = bool(api_key) or custom_base_ok or provider == "litellm"
+    llm_ready = llm.is_configured()
     billing_enabled = bool(billing.is_billing_enabled())
     credits = float(billing.get_user_credits(user_id))
     result = {
@@ -2282,6 +2362,69 @@ def _sse(event: str, payload: dict) -> str:
     return f"event: {event}\ndata: {_json_dumps(payload)}\n\n"
 
 
+def _stream_llm_with_recovery(llm_messages: list[dict], temperature: float = 0.35):
+    """Recover transient provider failures once without retrying business errors."""
+    service = LLMService()
+    has_partial = False
+    try:
+        for delta in service.stream_llm_api(llm_messages, temperature=temperature):
+            has_partial = has_partial or bool(delta)
+            yield "delta", {"text": delta}
+    except Exception as stream_error:
+        finish_reason = str(getattr(stream_error, "finish_reason", "") or "").lower()
+        if finish_reason == "length" and has_partial:
+            yield "warning", {
+                "code": "output_limit",
+                "msg": "The response reached the configured output limit and may be incomplete.",
+                "finish_reason": "length",
+                "truncated": True,
+            }
+            return
+
+        retryable = bool(getattr(stream_error, "retryable", False)) or isinstance(
+            stream_error,
+            requests.exceptions.RequestException,
+        )
+        if not retryable:
+            raise
+
+        logger.warning(
+            "LLM stream interrupted; regenerating once through the reliable path "
+            "(error_type=%s, finish_reason=%s, request_id=%s, generation_id=%s): %s",
+            getattr(stream_error, "error_type", "") or type(stream_error).__name__,
+            finish_reason,
+            getattr(stream_error, "request_id", ""),
+            getattr(stream_error, "generation_id", ""),
+            stream_error,
+            exc_info=True,
+        )
+        try:
+            recovered = service.call_llm_api(
+                llm_messages,
+                temperature=temperature,
+                use_json_mode=False,
+            )
+        except Exception as recovery_error:
+            logger.error(
+                "LLM stream recovery failed after %s: %s",
+                getattr(stream_error, "error_type", "") or type(stream_error).__name__,
+                recovery_error,
+                exc_info=True,
+            )
+            raise LLMAPIError(
+                f"LLM stream recovery failed: {recovery_error}",
+                status_code=int(getattr(recovery_error, "status_code", 502) or 502),
+                request_id=str(getattr(recovery_error, "request_id", "") or ""),
+                generation_id=str(getattr(recovery_error, "generation_id", "") or ""),
+                error_type=str(getattr(recovery_error, "error_type", "") or "recovery_failed"),
+                retryable=False,
+            ) from recovery_error
+        recovered = str(recovered or "").strip()
+        if not recovered:
+            raise ValueError("LLM recovery returned empty content") from stream_error
+        yield "replace", {"text": recovered, "recovered": True}
+
+
 @ai_chat_blp.route("/chat/message/stream", methods=["POST"])
 @login_required
 def chat_message_stream():
@@ -2313,6 +2456,11 @@ def chat_message_stream():
         sid = None
         costs = {}
         chunks: list[str] = []
+        stream_result = {
+            "recovered": False,
+            "truncated": False,
+            "finish_reason": "stop",
+        }
         usage_action = _agent_usage_action(agent_plan, context, language)
         try:
             with get_db_connection() as db:
@@ -2334,6 +2482,13 @@ def chat_message_stream():
                 )
                 cur.execute("UPDATE qd_ai_copilot_sessions SET updated_at = NOW() WHERE id = ?", (sid,))
                 db.commit()
+
+                # Mark the request as accepted before billing/provider work so clients
+                # never submit the same user message again after an SSE disconnect.
+                yield _sse("accepted", {
+                    "session_id": sid,
+                    "user_message_id": user_message_id,
+                })
 
                 charged, charge_msg, costs = _charge(user_id, bool(attachments), f"copilot:{sid}:{user_message_id}")
                 if not charged:
@@ -2360,9 +2515,22 @@ def chat_message_stream():
                     "actions": [usage_action] if usage_action else [],
                     "costs": costs,
                 })
-                for delta in LLMService().stream_llm_api(llm_messages, temperature=0.35):
-                    chunks.append(delta)
-                    yield _sse("delta", {"text": delta})
+                for stream_event, stream_payload in _stream_llm_with_recovery(llm_messages, temperature=0.35):
+                    if stream_event == "replace":
+                        text = str(stream_payload.get("text") or "")
+                        chunks = [text]
+                        stream_result["recovered"] = True
+                        yield _sse("replace", stream_payload)
+                    elif stream_event == "warning":
+                        stream_result["truncated"] = bool(stream_payload.get("truncated"))
+                        stream_result["finish_reason"] = str(
+                            stream_payload.get("finish_reason") or "length"
+                        )
+                        yield _sse("warning", stream_payload)
+                    else:
+                        text = str(stream_payload.get("text") or "")
+                        chunks.append(text)
+                        yield _sse("delta", stream_payload)
 
                 answer = "".join(chunks).strip() or "The model did not return a usable answer."
                 assistant_id = _insert_message(
@@ -2390,10 +2558,20 @@ def chat_message_stream():
                     "actions": [usage_action] if usage_action else [],
                     "costs": costs,
                     "memory_candidates": _detect_memory_candidates(message, language),
+                    **stream_result,
                 })
         except Exception as e:
             logger.error(f"chat_message_stream failed: {e}", exc_info=True)
-            yield _sse("error", {"msg": str(e), "session_id": sid, "costs": costs})
+            yield _sse("error", {
+                "msg": str(e),
+                "session_id": sid,
+                "costs": costs,
+                "error_type": str(getattr(e, "error_type", "") or "stream_failed"),
+                "finish_reason": str(getattr(e, "finish_reason", "") or ""),
+                "retryable": bool(getattr(e, "retryable", False)),
+                "request_id": str(getattr(e, "request_id", "") or ""),
+                "generation_id": str(getattr(e, "generation_id", "") or ""),
+            })
 
     return Response(generate(), mimetype="text/event-stream", headers={
         "Cache-Control": "no-cache, no-transform",
@@ -2642,5 +2820,3 @@ def save_chat_history():
 
 # openapi-compat: legacy import name
 ai_chat_bp = ai_chat_blp
-
-

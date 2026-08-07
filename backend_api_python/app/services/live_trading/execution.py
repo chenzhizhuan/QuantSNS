@@ -2,7 +2,7 @@
 Translate a strategy signal into a direct-exchange order call.
 
 Supports:
-- Crypto exchanges: Binance, OKX, Bitget, Bybit, Coinbase, Kraken, Gate, HTX
+- Crypto exchanges: Binance, OKX, Bitget, Bybit, Gate, HTX
 - Traditional brokers: Interactive Brokers (IBKR) and Alpaca
 """
 
@@ -18,9 +18,6 @@ from app.services.live_trading.okx import OkxClient
 from app.services.live_trading.bitget import BitgetMixClient
 from app.services.live_trading.bitget_spot import BitgetSpotClient
 from app.services.live_trading.bybit import BybitClient
-from app.services.live_trading.coinbase_exchange import CoinbaseExchangeClient
-from app.services.live_trading.kraken import KrakenClient
-from app.services.live_trading.kraken_futures import KrakenFuturesClient
 from app.services.live_trading.gate import GateSpotClient, GateUsdtFuturesClient
 
 # Lazy import HTX
@@ -237,10 +234,6 @@ def place_order_from_signal(
             pos_side=pos_side,
             client_order_id=client_order_id,
         )
-    if isinstance(client, CoinbaseExchangeClient):
-        return client.place_market_order(symbol=symbol, side=side, size=qty, client_order_id=client_order_id)
-    if isinstance(client, KrakenClient):
-        return client.place_market_order(symbol=symbol, side=side, size=qty, client_order_id=client_order_id)
     if isinstance(client, GateSpotClient):
         gate_size = qty
         if side == "buy":
@@ -249,8 +242,6 @@ def place_order_from_signal(
             )
         return client.place_market_order(symbol=symbol, side=side, size=gate_size, client_order_id=client_order_id)
     if isinstance(client, GateUsdtFuturesClient):
-        return client.place_market_order(symbol=symbol, side=side, size=qty, reduce_only=reduce_only, client_order_id=client_order_id)
-    if isinstance(client, KrakenFuturesClient):
         return client.place_market_order(symbol=symbol, side=side, size=qty, reduce_only=reduce_only, client_order_id=client_order_id)
 
     global HtxClient
@@ -321,21 +312,13 @@ def _place_ibkr_order(
     """
     Place order via IBKR for US stocks.
 
-    Signal mapping for stocks (no short selling in this implementation):
-    - open_long / add_long -> BUY
-    - close_long / reduce_long -> SELL
-    - open_short / close_short -> Not supported (raises error)
+    Signal mapping follows the signed IBKR stock position model.
     """
     sig = (signal_type or "").strip().lower()
 
-    # Stock trading: no short selling support in basic implementation
-    if "short" in sig:
-        raise LiveTradingError("IBKR stock trading does not support short signals in this implementation")
-
-    # Determine action
-    if sig in ("open_long", "add_long"):
+    if sig in ("open_long", "add_long", "close_short", "reduce_short"):
         action = "buy"
-    elif sig in ("close_long", "reduce_long"):
+    elif sig in ("close_long", "reduce_long", "open_short", "add_short"):
         action = "sell"
     else:
         raise LiveTradingError(f"Unsupported signal_type for IBKR: {signal_type}")
@@ -377,9 +360,8 @@ def _place_alpaca_order(
     """
     Place order via Alpaca for US stocks (USStock) or crypto.
 
-    Signal mapping mirrors IBKR for stocks (no short selling in this basic flow);
-    for crypto the same long-only mapping is used since Alpaca crypto doesn't
-    support shorting either.
+    US equities may use short signals when the account and asset allow it;
+    Alpaca crypto remains long-only.
 
     - open_long  / add_long   -> BUY
     - close_long / reduce_long -> SELL
@@ -387,12 +369,9 @@ def _place_alpaca_order(
     """
     sig = (signal_type or "").strip().lower()
 
-    if "short" in sig:
-        raise LiveTradingError("Alpaca does not support short signals (long-only)")
-
-    if sig in ("open_long", "add_long"):
+    if sig in ("open_long", "add_long", "close_short", "reduce_short"):
         action = "buy"
-    elif sig in ("close_long", "reduce_long"):
+    elif sig in ("close_long", "reduce_long", "open_short", "add_short"):
         action = "sell"
     else:
         raise LiveTradingError(f"Unsupported signal_type for Alpaca: {signal_type}")
@@ -400,6 +379,8 @@ def _place_alpaca_order(
     cfg = exchange_config if isinstance(exchange_config, dict) else {}
     raw_market = str(cfg.get("market_category") or cfg.get("market_type") or "USStock").strip().lower()
     market_type = "crypto" if raw_market in ("crypto", "cryptocurrency") else "USStock"
+    if market_type == "crypto" and "short" in sig:
+        raise LiveTradingError("Alpaca crypto does not support short signals")
 
     result = client.place_market_order(
         symbol=symbol,

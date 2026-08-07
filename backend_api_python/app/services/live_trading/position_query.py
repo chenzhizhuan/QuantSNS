@@ -1,9 +1,4 @@
-"""
-Resolve close/reduce order quantity from local DB and live exchange positions.
-
-When the DB snapshot lags (e.g. open fill not written yet), fall back to the
-exchange as source of truth instead of rejecting with amount=0.
-"""
+"""Resolve close/reduce quantities without crossing strategy ownership."""
 
 from __future__ import annotations
 
@@ -46,6 +41,7 @@ def query_exchange_position_size(
     pos_side: str,
     market_type: str,
     exchange_config: Optional[Dict[str, Any]] = None,
+    strict: bool = False,
 ) -> float:
     """
     Best-effort base-asset position size on the connected exchange for ``pos_side``.
@@ -60,16 +56,29 @@ def query_exchange_position_size(
     cfg = exchange_config if isinstance(exchange_config, dict) else {}
     sym = str(symbol or "").strip()
 
-    # Spot long close = sell base balance.
+    # Spot ownership is the complete base inventory.  Sell sizing has a
+    # separate free/available clamp because locked balances are still owned.
     if mt == "spot":
         if side != "long":
             return 0.0
         try:
-            from app.services.live_trading.spot_sizing import get_spot_free_base_balance
+            from app.services.live_trading.spot_sizing import get_spot_total_base_balance
 
-            return max(0.0, float(get_spot_free_base_balance(client, symbol=sym) or 0.0))
+            return max(
+                0.0,
+                float(
+                    get_spot_total_base_balance(
+                        client,
+                        symbol=sym,
+                        strict=strict,
+                    )
+                    or 0.0
+                ),
+            )
         except Exception as e:
-            logger.debug("spot free balance query failed symbol=%s: %s", sym, e)
+            if strict:
+                raise
+            logger.debug("spot total balance query failed symbol=%s: %s", sym, e)
             return 0.0
 
     try:
@@ -78,9 +87,10 @@ def query_exchange_position_size(
         from app.services.live_trading.bybit import BybitClient
         from app.services.live_trading.bitget import BitgetMixClient
         from app.services.live_trading.gate import GateUsdtFuturesClient
-        from app.services.live_trading.kraken_futures import KrakenFuturesClient
         from app.services.live_trading.htx import HtxClient
     except Exception:
+        if strict:
+            raise
         return 0.0
 
     if isinstance(client, OkxClient):
@@ -166,23 +176,6 @@ def query_exchange_position_size(
             qty_base = position_base_qty_for_side(p, side, contracts_to_base=qm)
             if qty_base > 0:
                 return float(qty_base)
-
-    if isinstance(client, KrakenFuturesClient):
-        resp = client.get_open_positions() or {}
-        positions = (
-            (resp.get("openPositions") if isinstance(resp, dict) else None)
-            or (resp.get("open_positions") if isinstance(resp, dict) else None)
-            or []
-        )
-        for p in positions:
-            if not isinstance(p, dict):
-                continue
-            p_sym = str(p.get("symbol") or p.get("instrument") or "").strip()
-            if sym and p_sym and not symbols_equivalent(p_sym, sym):
-                continue
-            qty = position_base_qty_for_side(p, side)
-            if qty > 0:
-                return qty
         return 0.0
 
     if isinstance(client, HtxClient):
@@ -213,6 +206,8 @@ def query_exchange_position_size(
     try:
         positions = client.get_positions() if hasattr(client, "get_positions") else []
     except Exception:
+        if strict:
+            raise
         positions = []
     if isinstance(positions, list):
         for p in positions:
@@ -229,6 +224,8 @@ def query_exchange_position_size(
             qty = position_base_qty_for_side(p, side)
             if qty > 0:
                 return qty
+    if strict:
+        raise RuntimeError(f"position_query_not_supported:{type(client).__name__}")
     return 0.0
 
 
@@ -257,14 +254,20 @@ def resolve_reduce_only_quantity(
     client: Any,
     market_type: str,
     exchange_config: Optional[Dict[str, Any]] = None,
+    allow_exchange_fallback: bool = False,
+    user_id: int = 0,
+    credential_id: int = 0,
 ) -> Tuple[float, Dict[str, Any]]:
     """
     Choose a safe close/reduce base quantity.
 
-    Priority:
-    1. Local DB size (cap requested amount).
-    2. Exchange size when DB missing or requested amount is zero.
-    3. Min(requested, exchange) when both exist.
+    Strategy orders are capped by the strategy-owned L3 position ledger.  The
+    exchange account position/balance is only a second safety cap and must not
+    become the source quantity, because it can include a user's manual holdings
+    or positions allocated to another strategy.
+
+    ``allow_exchange_fallback`` is an explicit recovery-only escape hatch for
+    callers that intentionally operate on the whole exchange position.
     """
     meta: Dict[str, Any] = {}
     amount = max(0.0, float(requested_amount or 0.0))
@@ -281,6 +284,9 @@ def resolve_reduce_only_quantity(
             amount = db_size
     else:
         meta["db_missing"] = True
+        if not allow_exchange_fallback:
+            amount = 0.0
+            meta["blocked_by"] = "strategy_position_missing"
 
     exch_size = query_exchange_position_size(
         client=client,
@@ -292,7 +298,7 @@ def resolve_reduce_only_quantity(
     meta["exchange_size"] = exch_size
 
     if exch_size > 0:
-        if amount <= 0:
+        if amount <= 0 and allow_exchange_fallback:
             amount = exch_size
             meta["filled_from"] = "exchange"
             logger.info(
@@ -318,6 +324,27 @@ def resolve_reduce_only_quantity(
             pos_side,
         )
         meta["filled_from"] = "none"
+
+    # In advanced coexistence mode the manual baseline is a hard floor.  Even
+    # a reduce-only strategy exit may use only quantity above that floor.
+    if int(user_id or 0) > 0 and int(credential_id or 0) > 0:
+        from app.services.live_trading.position_ownership import protected_quantity
+
+        # Deliberately fail closed.  If the protection ledger cannot be read,
+        # the caller must reject the exit instead of risking manual inventory.
+        protected = protected_quantity(
+            user_id=int(user_id),
+            credential_id=int(credential_id),
+            market_type=market_type,
+            symbol=symbol,
+            side=pos_side,
+        )
+        available = max(0.0, float(exch_size or 0.0) - float(protected or 0.0))
+        meta["protected_manual_qty"] = protected
+        meta["exchange_strategy_available"] = available
+        if amount > available:
+            amount = available
+            meta["capped_by"] = "protected_manual_position"
 
     meta["resolved"] = amount
     return amount, meta

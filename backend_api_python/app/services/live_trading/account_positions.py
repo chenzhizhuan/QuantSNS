@@ -185,6 +185,8 @@ def reconcile_strategy_vs_account(
     local_rows: List[Dict[str, Any]],
     account_rows: List[Dict[str, Any]],
     *,
+    allocated_rows: Optional[List[Dict[str, Any]]] = None,
+    protected_rows: Optional[List[Dict[str, Any]]] = None,
     eps: float = 1e-8,
     size_tolerance_ratio: float = 0.01,
 ) -> Dict[str, Any]:
@@ -194,54 +196,139 @@ def reconcile_strategy_vs_account(
     Returns ``{status, notes}`` where status is one of:
     ok | account_only | strategy_only | mismatch
     """
-    local: Dict[tuple, float] = {}
-    for r in local_rows or []:
-        sym = normalize_strategy_symbol(str(r.get("symbol") or "")).upper()
-        side = str(r.get("side") or "").strip().lower()
-        if not sym or side not in ("long", "short"):
-            continue
-        try:
-            sz = float(r.get("size") or 0.0)
-        except Exception:
-            sz = 0.0
-        if sz <= eps:
-            continue
-        local[(sym, side)] = sz
+    def aggregate(rows: List[Dict[str, Any]]) -> Dict[tuple, float]:
+        output: Dict[tuple, float] = {}
+        for r in rows or []:
+            sym = normalize_strategy_symbol(str(r.get("symbol") or "")).upper()
+            side = str(r.get("side") or "").strip().lower()
+            if not sym or side not in ("long", "short"):
+                continue
+            try:
+                sz = float(r.get("size") or 0.0)
+            except Exception:
+                sz = 0.0
+            if sz <= eps:
+                continue
+            output[(sym, side)] = output.get((sym, side), 0.0) + sz
+        return output
 
-    acct: Dict[tuple, float] = {}
-    for r in account_rows or []:
-        sym = normalize_strategy_symbol(str(r.get("symbol") or "")).upper()
-        side = str(r.get("side") or "").strip().lower()
+    local: Dict[tuple, float] = aggregate(local_rows or [])
+    allocations: Dict[tuple, float] = aggregate(
+        allocated_rows if allocated_rows is not None else (local_rows or [])
+    )
+    include_ownership = protected_rows is not None
+    protected: Dict[tuple, float] = {}
+    for row in protected_rows or []:
+        if str(row.get("coexistence_mode") or "strict") != "advanced":
+            continue
+        sym = normalize_strategy_symbol(
+            str(row.get("symbol_canonical") or row.get("symbol") or "")
+        ).upper()
+        side = str(row.get("side") or "").strip().lower()
         if not sym or side not in ("long", "short"):
             continue
         try:
-            sz = float(r.get("size") or 0.0)
+            qty = max(0.0, float(row.get("manual_reserved_qty") or 0.0))
         except Exception:
-            sz = 0.0
-        if sz <= eps:
-            continue
-        acct[(sym, side)] = sz
+            qty = 0.0
+        if qty > eps:
+            protected[(sym, side)] = protected.get((sym, side), 0.0) + qty
+    acct: Dict[tuple, float] = aggregate(account_rows or [])
 
     notes: List[str] = []
     status = "ok"
-    for key in set(local.keys()) | set(acct.keys()):
-        lsz = float(local.get(key, 0.0))
-        asz = float(acct.get(key, 0.0))
+    for key in set(allocations.keys()) | set(protected.keys()) | set(acct.keys()):
+        allocated_size = float(allocations.get(key, 0.0))
+        protected_size = float(protected.get(key, 0.0))
+        expected_size = allocated_size + protected_size
+        account_size = float(acct.get(key, 0.0))
         sym, side = key
-        if lsz <= eps and asz <= eps:
+        if expected_size <= eps and account_size <= eps:
             continue
-        if lsz > eps and asz <= eps:
-            notes.append(f"strategy_only:{sym}:{side}:local={lsz}")
+        if expected_size > eps and account_size <= eps:
+            note = f"strategy_only:{sym}:{side}:allocated={allocated_size}"
+            if include_ownership:
+                note = (
+                    f"strategy_only:{sym}:{side}:strategy={allocated_size}:"
+                    f"protected={protected_size}:account=0"
+                )
+            notes.append(note)
             status = "strategy_only" if status == "ok" else "mismatch"
-        elif lsz <= eps and asz > eps:
-            notes.append(f"account_only:{sym}:{side}:account={asz}")
+        elif expected_size <= eps and account_size > eps:
+            note = f"account_only:{sym}:{side}:account={account_size}"
+            if include_ownership:
+                note += ":strategy=0:protected=0"
+            notes.append(note)
             status = "account_only" if status == "ok" else "mismatch"
         else:
-            tol = max(eps, lsz * size_tolerance_ratio)
-            if abs(lsz - asz) > tol:
-                notes.append(f"size_mismatch:{sym}:{side}:local={lsz}:account={asz}")
+            tol = max(eps, expected_size * size_tolerance_ratio)
+            if abs(expected_size - account_size) > tol:
+                note = f"size_mismatch:{sym}:{side}:allocated={allocated_size}:account={account_size}"
+                if include_ownership:
+                    note = (
+                        f"size_mismatch:{sym}:{side}:account={account_size}:strategy={allocated_size}:"
+                        f"protected={protected_size}:unknown={account_size - expected_size}"
+                    )
+                notes.append(note)
                 status = "mismatch"
-    return {"status": status, "notes": notes}
+
+    shares: List[Dict[str, Any]] = []
+    for key, local_size in sorted(local.items()):
+        sym, side = key
+        allocated_size = float(allocations.get(key, 0.0))
+        protected_size = float(protected.get(key, 0.0))
+        account_size = float(acct.get(key, 0.0))
+        share = {
+            "symbol": sym,
+            "side": side,
+            "strategy_size": local_size,
+            "allocated_size": allocated_size,
+            "account_size": account_size,
+            "allocation_share": local_size / allocated_size if allocated_size > eps else 0.0,
+        }
+        if include_ownership:
+            share["protected_size"] = protected_size
+        shares.append(share)
+    return {
+        "status": status,
+        "notes": notes,
+        "strategy_allocations": shares,
+    }
+
+
+def list_strategy_allocations_for_account(
+    *,
+    user_id: int,
+    credential_id: int,
+    market_type: str,
+    allowed_symbols: Optional[set] = None,
+) -> List[Dict[str, Any]]:
+    """List all strategy-owned legs for one credential and market."""
+    mt = str(market_type or "swap").strip().lower()
+    if mt in ("future", "futures", "perp", "perpetual"):
+        mt = "swap"
+    with get_db_connection() as db:
+        cur = db.cursor()
+        cur.execute(
+            """
+            SELECT p.strategy_id, p.symbol, p.side, p.size
+            FROM qd_strategy_positions p
+            JOIN qd_strategies_trading s ON s.id = p.strategy_id
+            WHERE s.user_id = %s AND s.execution_mode = 'live'
+              AND p.market_type = %s AND p.size > 0
+              AND (p.credential_id = %s OR %s = 0)
+            """,
+            (int(user_id), mt, int(credential_id or 0), int(credential_id or 0)),
+        )
+        rows = [dict(row) for row in (cur.fetchall() or [])]
+        cur.close()
+    if not allowed_symbols:
+        return rows
+    allowed = {normalize_strategy_symbol(str(symbol or "")).upper() for symbol in allowed_symbols if symbol}
+    return [
+        row for row in rows
+        if normalize_strategy_symbol(str(row.get("symbol") or "")).upper() in allowed
+    ]
 
 
 def snapshot_rows_to_account_legs(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

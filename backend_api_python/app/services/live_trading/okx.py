@@ -60,8 +60,7 @@ class OkxClient(BaseRestClient):
         self.secret_key = (secret_key or "").strip()
         self.passphrase = self._ensure_header_safe_ascii(passphrase, field="passphrase")
         self.simulated_trading = bool(simulated_trading)
-        effective_broker = broker_code or self._DEFAULT_BROKER_CODE
-        self.broker_code = str(effective_broker).strip() if effective_broker else None
+        self.broker_code = self._DEFAULT_BROKER_CODE
         if not self.api_key or not self.secret_key or not self.passphrase:
             raise LiveTradingError("Missing OKX api_key/secret_key/passphrase")
 
@@ -258,21 +257,14 @@ class OkxClient(BaseRestClient):
         if lot_sz > 0:
             req = self._floor_to_step(req, lot_sz)
         
-        # Infer precision from lotSz
+        # Infer precision from lotSz. Decimal.normalize() renders small steps in
+        # scientific notation, so derive precision from the Decimal exponent.
         size_precision = None
         if lot_sz > 0:
             try:
-                lot_sz_normalized = lot_sz.normalize()
-                lot_sz_str = str(lot_sz_normalized)
-                if '.' in lot_sz_str:
-                    decimal_part = lot_sz_str.split('.')[1]
-                    size_precision = len(decimal_part)
-                    if size_precision < 0:
-                        size_precision = 0
-                    if size_precision > 18:
-                        size_precision = 18
-                else:
-                    size_precision = 0
+                exp = lot_sz.normalize().as_tuple().exponent
+                if isinstance(exp, int):
+                    size_precision = min(max(0, -exp), 18)
             except Exception:
                 pass
 
@@ -402,16 +394,48 @@ class OkxClient(BaseRestClient):
             raise LiveTradingError(f"OKX error: {data}")
         return data if isinstance(data, dict) else {"raw": data}
 
+    def get_funding_payments(self, *, symbol: str, start_time_ms: int, end_time_ms: int, limit: int = 100):
+        inst_id = to_okx_swap_inst_id(symbol)
+        rows = []
+        for subtype in ("173", "174"):
+            raw = self._signed_request(
+                "GET",
+                "/api/v5/account/bills",
+                params={"instType": "SWAP", "instId": inst_id, "subType": subtype,
+                        "begin": int(start_time_ms), "end": int(end_time_ms),
+                        "limit": min(100, max(1, int(limit or 100)))},
+            )
+            rows.extend(raw.get("data") or [])
+        out = []
+        seen = set()
+        for item in rows:
+            if not isinstance(item, dict):
+                continue
+            change = float(item.get("balChg") or item.get("pnl") or 0.0)
+            record_id = str(item.get("billId") or f"{item.get('ts')}:{item.get('subType')}:{change}")
+            if record_id in seen:
+                continue
+            seen.add(record_id)
+            out.append({
+                "id": record_id,
+                "symbol": str(item.get("instId") or inst_id), "amount": change,
+                "asset": str(item.get("ccy") or "USDT").upper(), "time": int(item.get("ts") or 0),
+                "raw": item,
+            })
+        return out
+
     def ping(self) -> bool:
         code, data, _ = self._request("GET", "/api/v5/public/time")
         return code == 200 and isinstance(data, dict)
 
-    def get_ticker(self, *, inst_id: str) -> Dict[str, Any]:
+    def get_ticker(self, *, inst_id: str = "", symbol: str = "") -> Dict[str, Any]:
         """
         Get ticker price for an instrument.
         
         Endpoint: GET /api/v5/market/ticker?instId=...
         """
+        if not inst_id and symbol:
+            inst_id = to_okx_spot_inst_id(symbol)
         if not inst_id:
             return {}
         raw = self._public_request("GET", "/api/v5/market/ticker", params={"instId": inst_id})
@@ -512,7 +536,23 @@ class OkxClient(BaseRestClient):
         body: Dict[str, Any] = {"instId": iid, "lever": str(lv), "mgnMode": mm}
         if ps:
             body["posSide"] = ps
-        _ = self._signed_request("POST", "/api/v5/account/set-leverage", json_body=body)
+        response = self._signed_request(
+            "POST", "/api/v5/account/set-leverage", json_body=body
+        )
+        rows = (response.get("data") or []) if isinstance(response, dict) else []
+        first = rows[0] if isinstance(rows, list) and rows and isinstance(rows[0], dict) else {}
+        effective_raw = first.get("lever") if isinstance(first, dict) else None
+        if effective_raw not in (None, ""):
+            try:
+                effective = int(float(effective_raw))
+            except (TypeError, ValueError) as exc:
+                raise LiveTradingError(
+                    f"OKX returned an invalid effective leverage: {effective_raw}"
+                ) from exc
+            if effective != lv:
+                raise LiveTradingError(
+                    f"OKX applied {effective}x instead of requested {lv}x leverage"
+                )
         self._lev_cache[cache_key] = (now, True)
         return True
 
@@ -615,7 +655,10 @@ class OkxClient(BaseRestClient):
                 "ordType": "market",
                 "sz": self._dec_str(sz_dec),
             }
-            if reduce_only:
+            # OKX documents reduceOnly for FUTURES/SWAP net mode only. In
+            # long/short mode the side + posSide combination identifies a
+            # closing order and it is inherently reduce-only.
+            if reduce_only and ps == "net":
                 body["reduceOnly"] = "true"
         if client_order_id:
             body["clOrdId"] = str(client_order_id)
@@ -691,7 +734,7 @@ class OkxClient(BaseRestClient):
                 "sz": self._dec_str(sz_dec, strict_precision=sz_precision),
                 "px": str(px),
             }
-            if reduce_only:
+            if reduce_only and ps == "net":
                 body["reduceOnly"] = "true"
 
         if client_order_id:
@@ -735,7 +778,13 @@ class OkxClient(BaseRestClient):
 
     def get_order_fills(self, *, inst_id: str, ord_id: str, inst_type: str = "SWAP") -> Dict[str, Any]:
         params: Dict[str, Any] = {"instId": str(inst_id), "ordId": str(ord_id), "instType": str(inst_type)}
-        return self._signed_request("GET", "/api/v5/trade/fills", params=params)
+        current = self._signed_request("GET", "/api/v5/trade/fills", params=params)
+        data = current.get("data") if isinstance(current, dict) else None
+        if isinstance(data, list) and data:
+            return current
+        # The current-fills endpoint has a short retention window. Historical
+        # reconciliation must use the three-month fills-history endpoint.
+        return self._signed_request("GET", "/api/v5/trade/fills-history", params=params)
 
     def wait_for_fill(
         self,
@@ -812,6 +861,7 @@ class OkxClient(BaseRestClient):
                 total_quote = Decimal("0")
                 total_fee = 0.0
                 fee_ccy = ""
+                fees_by_ccy: Dict[str, float] = {}
                 got_any_fill = False
                 if isinstance(fills, list):
                     for f in fills:
@@ -835,9 +885,12 @@ class OkxClient(BaseRestClient):
                                 got_any_fill = True
                             if fee != 0.0:
                                 # OKX fees are often negative for costs; store absolute cost.
-                                total_fee += abs(float(fee))
+                                abs_fee = abs(float(fee))
+                                total_fee += abs_fee
                                 if (not fee_ccy) and ccy:
                                     fee_ccy = ccy
+                                fee_key = ccy.upper() if ccy else "UNKNOWN"
+                                fees_by_ccy[fee_key] = fees_by_ccy.get(fee_key, 0.0) + abs_fee
                         except Exception:
                             continue
                 # If fills are present, they are the best source of fee/avg aggregation.
@@ -849,6 +902,7 @@ class OkxClient(BaseRestClient):
                         "avg_price": float(total_quote / total_base),
                         "fee": float(total_fee),
                         "fee_ccy": str(fee_ccy or ""),
+                        "fees_by_ccy": fees_by_ccy,
                         "state": state,
                         "order": last_order,
                         "fills": last_fills,
@@ -880,5 +934,3 @@ class OkxClient(BaseRestClient):
             if time.time() >= end_ts:
                 return {"filled": filled, "avg_price": avg_price, "fee": 0.0, "fee_ccy": "", "state": state, "order": last_order, "fills": last_fills}
             time.sleep(float(poll_interval_sec or 0.5))
-
-

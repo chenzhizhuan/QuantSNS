@@ -8,6 +8,7 @@ import traceback
 
 from flask import Flask
 
+from app.runtime.roles import ProcessRole, current_process_role, strategy_commands_enabled
 from app.utils.logger import get_logger
 
 
@@ -15,14 +16,21 @@ logger = get_logger(__name__)
 
 _trading_executor = None
 _pending_order_worker = None
+_execution_stream_supervisor = None
 
 
 def get_trading_executor():
-    """Get the process-local trading executor singleton."""
+    """Return a local executor or the durable API command proxy."""
     global _trading_executor
     if _trading_executor is None:
-        from app.services.trading_executor import TradingExecutor
-        _trading_executor = TradingExecutor()
+        if current_process_role() is ProcessRole.API and strategy_commands_enabled():
+            from app.services.strategy_command_client import StrategyCommandClient
+
+            _trading_executor = StrategyCommandClient()
+        else:
+            from app.services.trading_executor import TradingExecutor
+
+            _trading_executor = TradingExecutor()
     return _trading_executor
 
 
@@ -33,6 +41,15 @@ def get_pending_order_worker():
         from app.services.pending_order_worker import PendingOrderWorker
         _pending_order_worker = PendingOrderWorker()
     return _pending_order_worker
+
+
+def get_execution_stream_supervisor():
+    global _execution_stream_supervisor
+    if _execution_stream_supervisor is None:
+        from app.services.execution_streams import get_execution_stream_supervisor as _get
+
+        _execution_stream_supervisor = _get()
+    return _execution_stream_supervisor
 
 
 def _is_debug_reloader_parent() -> bool:
@@ -77,6 +94,14 @@ def start_grid_fill_poller():
         get_grid_fill_poller().start()
     except Exception as e:
         logger.error(f"Failed to start grid fill poller: {e}")
+
+
+def start_execution_stream_supervisor():
+    """Start private account/order streams before REST fallback pollers."""
+    try:
+        get_execution_stream_supervisor().start()
+    except Exception as e:
+        logger.error(f"Failed to start execution stream supervisor: {e}", exc_info=True)
 
 
 def start_usdt_order_worker():
@@ -186,25 +211,61 @@ def _schedule_post_restore_position_sync() -> None:
 
 
 def run_startup_hooks(app: Flask) -> None:
-    """Run optional background startup hooks after route registration."""
+    """Start only the services assigned to the current process role."""
     skip_hooks = os.getenv("SKIP_STARTUP_HOOKS", "").strip().lower() in (
         "1", "true", "yes", "on",
     )
     if skip_hooks:
         return
+    role = current_process_role()
+    if role in {ProcessRole.API, ProcessRole.CELERY}:
+        logger.info("No process-local background services for role=%s", role.value)
+        return
     with app.app_context():
-        start_pending_order_worker()
-        start_grid_fill_poller()
-        start_portfolio_monitor()
-        start_usdt_order_worker()
-        try:
-            from app.services.ai_calibration import start_ai_calibration_worker
-            start_ai_calibration_worker()
-        except Exception:
-            pass
-        try:
-            from app.services.reflection import start_reflection_worker
-            start_reflection_worker()
-        except Exception:
-            pass
+        if role in {ProcessRole.TRADING, ProcessRole.SCHEDULER}:
+            logger.info("Process services are controlled by the %s entrypoint", role.value)
+            return
+        _start_trading_support_services()
+        _start_scheduler_services(include_celery_managed=True)
         restore_running_strategies()
+
+
+def _start_trading_support_services() -> None:
+    """Start exchange-facing services that belong with the trading runtime."""
+    start_execution_stream_supervisor()
+    start_pending_order_worker()
+    start_grid_fill_poller()
+
+
+def _start_scheduler_services(*, include_celery_managed: bool = False) -> None:
+    """Start long-lived schedulers that are not Celery tasks."""
+    start_portfolio_monitor()
+    start_usdt_order_worker()
+    try:
+        from app.services.indicator_signal_alerts import start_indicator_signal_alert_worker
+
+        start_indicator_signal_alert_worker()
+    except Exception:
+        logger.error("Failed to start indicator signal alert worker", exc_info=True)
+
+    try:
+        from app.services.market_catalog_sync import start_market_catalog_sync_on_boot
+
+        start_market_catalog_sync_on_boot()
+    except Exception:
+        logger.error("Failed to start initial market catalog sync", exc_info=True)
+
+    if not include_celery_managed:
+        return
+    try:
+        from app.services.ai_calibration import start_ai_calibration_worker
+
+        start_ai_calibration_worker()
+    except Exception:
+        logger.error("Failed to start AI calibration", exc_info=True)
+    try:
+        from app.services.reflection import start_reflection_worker
+
+        start_reflection_worker()
+    except Exception:
+        logger.error("Failed to start reflection worker", exc_info=True)
