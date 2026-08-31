@@ -15,13 +15,14 @@ import datetime
 import logging
 import os
 import time
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urlparse
 
 from app.services.live_trading.base import BaseRestClient, LiveOrderResult, LiveTradingError
 from app.services.live_trading import htx_v5
 from app.services.live_trading.symbols import to_htx_contract_code, to_htx_spot_symbol
+from app.utils.numeric_precision import floor_decimal_to_step
 
 logger = logging.getLogger(__name__)
 
@@ -115,10 +116,7 @@ class HtxClient(BaseRestClient):
 
     @staticmethod
     def _floor_to_int(value: Decimal) -> int:
-        try:
-            return int(value.to_integral_value(rounding=ROUND_DOWN))
-        except Exception:
-            return 0
+        return int(floor_decimal_to_step(value, Decimal("1")))
 
     def _sign_params(self, *, method: str, base_url: str, path: str, params: Dict[str, Any]) -> Dict[str, Any]:
         signed = dict(params or {})
@@ -529,6 +527,21 @@ class HtxClient(BaseRestClient):
         if obj:
             self._contract_cache[key] = (now, obj)
         return obj
+
+    def get_spot_symbol_info(self, *, symbol: str) -> Dict[str, Any]:
+        """Return native public spot precision and minimum-order metadata."""
+        native = to_htx_spot_symbol(symbol)
+        raw = self._spot_public_request("GET", "/v1/common/symbols")
+        rows = raw.get("data") if isinstance(raw, dict) else None
+        target = native.replace("-", "").replace("_", "").upper()
+        for item in rows if isinstance(rows, list) else []:
+            if not isinstance(item, dict):
+                continue
+            candidate = str(item.get("symbol") or "")
+            candidate = candidate.replace("-", "").replace("_", "").upper()
+            if candidate == target:
+                return item
+        return {}
 
     def _base_to_contracts(self, *, symbol: str, qty: float) -> int:
         req = self._to_dec(qty)
